@@ -484,6 +484,48 @@ showconf(){
     red "$(cat /root/hy/url.txt)"
 }
 
+# ================= 新增的 BBR 加速开启函数 =================
+enable_bbr(){
+    # 检查是否已经开启了 BBR
+    if [[ $(sysctl net.ipv4.tcp_congestion_control | grep bbr) ]]; then
+        green "=========================================="
+        green "检测到 BBR 加速已经开启，无需重复配置！"
+        green "=========================================="
+        sleep 2
+        menu
+        return
+    fi
+    
+    green "正在为您开启 BBR 加速及 fq 队列规则..."
+    
+    # 清理旧的 sysctl 配置，防止冲突重复
+    sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
+    sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
+    
+    # 写入新配置
+    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    
+    # 使配置生效
+    sysctl -p >/dev/null 2>&1
+    
+    # 再次验证是否成功
+    if [[ $(sysctl net.ipv4.tcp_congestion_control | grep bbr) ]]; then
+        green "=========================================="
+        green "BBR 加速开启成功！网络吞吐量已优化。"
+        green "=========================================="
+    else
+        red "=========================================="
+        red "BBR 加速开启失败，请检查您的系统内核版本 (需 >= 4.9)。"
+        red "=========================================="
+    fi
+    
+    echo ""
+    read -p "按回车键返回主菜单..."
+    menu
+}
+# =======================================================
+
 menu() {
     clear
     echo "#############################################################"
@@ -496,16 +538,19 @@ menu() {
     echo -e " 3. 关闭、开启、重启 Hysteria 2"
     echo -e " 4. 修改 Hysteria 2 配置"
     echo -e " 5. 显示 Hysteria 2 配置文件"
+    echo -e " ${YELLOW}6. 开启 BBR 网络加速 (推荐)${PLAIN}"
     echo " ------------------------------------------------------------"
     echo -e " 0. 退出脚本"
     echo ""
-    read -rp "请输入选项 [0-5]: " menuInput
+    read -rp "请输入选项 [0-6]: " menuInput
     case $menuInput in
         1 ) insthysteria ;;
         2 ) unsthysteria ;;
         3 ) hysteriaswitch ;;
         4 ) changeconf ;;
         5 ) showconf ;;
+        6 ) enable_bbr ;;
+        0 ) exit 0 ;;
         * ) exit 1 ;;
     esac
 }
