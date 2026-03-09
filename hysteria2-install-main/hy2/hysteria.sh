@@ -19,13 +19,13 @@ yellow(){
     echo -e "\033[33m\033[01m$1\033[0m"
 }
 
-# 判断系统及定义系统安装依赖方式
-REGEX=("debian" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "'amazon linux'" "fedora")
-RELEASE=("Debian" "Ubuntu" "CentOS" "CentOS" "Fedora")
-PACKAGE_UPDATE=("apt-get update" "apt-get update" "yum -y update" "yum -y update" "yum -y update")
-PACKAGE_INSTALL=("apt -y install" "apt -y install" "yum -y install" "yum -y install" "yum -y install")
-PACKAGE_REMOVE=("apt -y remove" "apt -y remove" "yum -y remove" "yum -y remove" "yum -y remove")
-PACKAGE_UNINSTALL=("apt -y autoremove" "apt -y autoremove" "yum -y autoremove" "yum -y autoremove" "yum -y autoremove")
+# 判断系统及定义系统安装依赖方式 (新增了 Alpine 支持)
+REGEX=("alpine" "debian" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "'amazon linux'" "fedora")
+RELEASE=("Alpine" "Debian" "Ubuntu" "CentOS" "CentOS" "Fedora")
+PACKAGE_UPDATE=("apk update" "apt-get update" "apt-get update" "yum -y update" "yum -y update" "yum -y update")
+PACKAGE_INSTALL=("apk add" "apt -y install" "apt -y install" "yum -y install" "yum -y install" "yum -y install")
+PACKAGE_REMOVE=("apk del" "apt -y remove" "apt -y remove" "yum -y remove" "yum -y remove" "yum -y remove")
+PACKAGE_UNINSTALL=("apk cache clean" "apt -y autoremove" "apt -y autoremove" "yum -y autoremove" "yum -y autoremove" "yum -y autoremove")
 
 [[ $EUID -ne 0 ]] && red "注意: 请在root用户下运行脚本" && exit 1
 
@@ -47,6 +47,21 @@ if [[ -z $(type -P curl) ]]; then
     fi
     ${PACKAGE_INSTALL[int]} curl
 fi
+
+# ================= 兼容 OpenRC 和 Systemd 的服务控制函数 =================
+svc_start() {
+    if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" start >/dev/null 2>&1; else systemctl start "$1" >/dev/null 2>&1; fi
+}
+svc_stop() {
+    if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" stop >/dev/null 2>&1; else systemctl stop "$1" >/dev/null 2>&1; fi
+}
+svc_enable() {
+    if [[ $SYSTEM == "Alpine" ]]; then rc-update add "$1" default >/dev/null 2>&1; else systemctl enable "$1" >/dev/null 2>&1; fi
+}
+svc_disable() {
+    if [[ $SYSTEM == "Alpine" ]]; then rc-update del "$1" default >/dev/null 2>&1; else systemctl disable "$1" >/dev/null 2>&1; fi
+}
+# =========================================================================
 
 realip(){
     ip=$(curl -s4m8 ip.sb -k) || ip=$(curl -s6m8 ip.sb -k)
@@ -75,10 +90,10 @@ inst_cert(){
             WARPv6Status=$(curl -s6m8 https://www.cloudflare.com/cdn-cgi/trace -k | grep warp | cut -d= -f2)
             if [[ $WARPv4Status =~ on|plus ]] || [[ $WARPv6Status =~ on|plus ]]; then
                 wg-quick down wgcf >/dev/null 2>&1
-                systemctl stop warp-go >/dev/null 2>&1
+                svc_stop warp-go
                 realip
                 wg-quick up wgcf >/dev/null 2>&1
-                systemctl start warp-go >/dev/null 2>&1
+                svc_start warp-go
             else
                 realip
             fi
@@ -91,12 +106,16 @@ inst_cert(){
                 ${PACKAGE_INSTALL[int]} curl wget sudo socat openssl
                 if [[ $SYSTEM == "CentOS" ]]; then
                     ${PACKAGE_INSTALL[int]} cronie
-                    systemctl start crond
-                    systemctl enable crond
+                    svc_start crond
+                    svc_enable crond
+                elif [[ $SYSTEM == "Alpine" ]]; then
+                    ${PACKAGE_INSTALL[int]} cronie
+                    svc_start crond
+                    svc_enable crond
                 else
                     ${PACKAGE_INSTALL[int]} cron
-                    systemctl start cron
-                    systemctl enable cron
+                    svc_start cron
+                    svc_enable cron
                 fi
                 curl https://get.acme.sh | sh -s email=$(date +%s%N | md5sum | cut -c 1-16)@gmail.com
                 source ~/.bashrc
@@ -137,6 +156,7 @@ inst_cert(){
     else
         green "将使用必应自签证书作为 Hysteria 2 的节点证书"
 
+        mkdir -p /etc/hysteria
         cert_path="/etc/hysteria/cert.crt"
         key_path="/etc/hysteria/private.key"
         openssl ecparam -genkey -name prime256v1 -out /etc/hysteria/private.key
@@ -186,7 +206,12 @@ inst_jump(){
         fi
         iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport  -j DNAT --to-destination :$port
         ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport  -j DNAT --to-destination :$port
-        netfilter-persistent save >/dev/null 2>&1
+        if [[ $SYSTEM == "Alpine" ]]; then
+            rc-service iptables save >/dev/null 2>&1 || true
+            rc-service ip6tables save >/dev/null 2>&1 || true
+        else
+            netfilter-persistent save >/dev/null 2>&1
+        fi
     else
         red "将继续使用单端口模式"
     fi
@@ -209,9 +234,9 @@ insthysteria(){
     warpv4=$(curl -s4m8 https://www.cloudflare.com/cdn-cgi/trace -k | grep warp | cut -d= -f2)
     if [[ $warpv4 =~ on|plus || $warpv6 =~ on|plus ]]; then
         wg-quick down wgcf >/dev/null 2>&1
-        systemctl stop warp-go >/dev/null 2>&1
+        svc_stop warp-go
         realip
-        systemctl start warp-go >/dev/null 2>&1
+        svc_start warp-go
         wg-quick up wgcf >/dev/null 2>&1
     else
         realip
@@ -220,16 +245,58 @@ insthysteria(){
     if [[ ! ${SYSTEM} == "CentOS" ]]; then
         ${PACKAGE_UPDATE}
     fi
-    ${PACKAGE_INSTALL} curl wget sudo qrencode procps iptables-persistent netfilter-persistent
+    
+    if [[ $SYSTEM == "Alpine" ]]; then
+        ${PACKAGE_INSTALL} curl wget sudo qrencode procps iptables ip6tables iproute2
+    else
+        ${PACKAGE_INSTALL} curl wget sudo qrencode procps iptables-persistent netfilter-persistent
+    fi
 
-    wget -N https://raw.githubusercontent.com/Misaka-blog/hysteria-install/main/hy2/install_server.sh
-    bash install_server.sh
-    rm -f install_server.sh
+    mkdir -p /etc/hysteria
+    if [[ $SYSTEM == "Alpine" ]]; then
+        green "正在为 Alpine 下载 Hysteria 2 二进制核心..."
+        arch=$(uname -m)
+        case $arch in
+            x86_64) hy_arch="amd64" ;;
+            aarch64) hy_arch="arm64" ;;
+            s390x) hy_arch="s390x" ;;
+            *) red "不支持的架构: $arch" && exit 1 ;;
+        esac
+        
+        # 获取最新版本号并下载
+        hy_ver=$(curl -s https://api.github.com/repos/apernet/hysteria/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        [[ -z $hy_ver ]] && hy_ver="app/v2.4.0" # 兜底版本
+        wget -N -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/download/${hy_ver}/hysteria-linux-${hy_arch}"
+        chmod +x /usr/local/bin/hysteria
+        
+        # 为 Alpine 生成 OpenRC 服务脚本
+        cat << 'EOF' > /etc/init.d/hysteria-server
+#!/sbin/openrc-run
+description="Hysteria 2 Server"
+command="/usr/local/bin/hysteria"
+command_args="server -c /etc/hysteria/config.yaml"
+command_background=true
+pidfile="/run/hysteria-server.pid"
+output_log="/var/log/hysteria-server.log"
+error_log="/var/log/hysteria-server.log"
+
+depend() {
+    need net
+    use dns
+}
+EOF
+        chmod +x /etc/init.d/hysteria-server
+    else
+        wget -N https://raw.githubusercontent.com/Misaka-blog/hysteria-install/main/hy2/install_server.sh
+        bash install_server.sh
+        rm -f install_server.sh
+    fi
 
     if [[ -f "/usr/local/bin/hysteria" ]]; then
         green "Hysteria 2 安装成功！"
     else
         red "Hysteria 2 安装失败！"
+        exit 1
     fi
 
     # 询问用户 Hysteria 配置
@@ -277,7 +344,7 @@ EOF
         last_ip=$ip
     fi
 
-    mkdir /root/hy
+    mkdir -p /root/hy
     cat << EOF > /root/hy/hy-client.yaml
 server: $last_ip:$last_port
 
@@ -330,14 +397,25 @@ EOF
     url="hysteria2://$auth_pwd@$last_ip:$last_port/?insecure=1&sni=$hy_domain#Hysteria2-misaka"
     echo $url > /root/hy/url.txt
 
-    systemctl daemon-reload
-    systemctl enable hysteria-server
-    systemctl start hysteria-server
-    if [[ -n $(systemctl status hysteria-server 2>/dev/null | grep -w active) && -f '/etc/hysteria/config.yaml' ]]; then
-        green "Hysteria 2 服务启动成功"
+    [[ $SYSTEM != "Alpine" ]] && systemctl daemon-reload
+    svc_enable hysteria-server
+    svc_start hysteria-server
+    
+    # 状态检测逻辑分离
+    if [[ $SYSTEM == "Alpine" ]]; then
+        if [[ -n $(rc-service hysteria-server status 2>/dev/null | grep -w started) && -f '/etc/hysteria/config.yaml' ]]; then
+            green "Hysteria 2 服务启动成功"
+        else
+            red "Hysteria 2 服务启动失败，请运行 rc-service hysteria-server status 查看服务状态并反馈，脚本退出" && exit 1
+        fi
     else
-        red "Hysteria 2 服务启动失败，请运行 systemctl status hysteria-server 查看服务状态并反馈，脚本退出" && exit 1
+        if [[ -n $(systemctl status hysteria-server 2>/dev/null | grep -w active) && -f '/etc/hysteria/config.yaml' ]]; then
+            green "Hysteria 2 服务启动成功"
+        else
+            red "Hysteria 2 服务启动失败，请运行 systemctl status hysteria-server 查看服务状态并反馈，脚本退出" && exit 1
+        fi
     fi
+    
     red "======================================================================================"
     green "Hysteria 2 代理服务安装完成"
     yellow "Hysteria 2 客户端 YAML 配置文件 hy-client.yaml 内容如下，并保存到 /root/hy/hy-client.yaml"
@@ -349,24 +427,29 @@ EOF
 }
 
 unsthysteria(){
-    systemctl stop hysteria-server.service >/dev/null 2>&1
-    systemctl disable hysteria-server.service >/dev/null 2>&1
-    rm -f /lib/systemd/system/hysteria-server.service /lib/systemd/system/hysteria-server@.service
+    svc_stop hysteria-server
+    svc_disable hysteria-server
+    if [[ $SYSTEM == "Alpine" ]]; then
+        rm -f /etc/init.d/hysteria-server
+        rc-service iptables save >/dev/null 2>&1 || true
+    else
+        rm -f /lib/systemd/system/hysteria-server.service /lib/systemd/system/hysteria-server@.service
+        netfilter-persistent save >/dev/null 2>&1
+    fi
     rm -rf /usr/local/bin/hysteria /etc/hysteria /root/hy /root/hysteria.sh
     iptables -t nat -F PREROUTING >/dev/null 2>&1
-    netfilter-persistent save >/dev/null 2>&1
 
     green "Hysteria 2 已彻底卸载完成！"
 }
 
 starthysteria(){
-    systemctl start hysteria-server
-    systemctl enable hysteria-server >/dev/null 2>&1
+    svc_start hysteria-server
+    svc_enable hysteria-server
 }
 
 stophysteria(){
-    systemctl stop hysteria-server
-    systemctl disable hysteria-server >/dev/null 2>&1
+    svc_stop hysteria-server
+    svc_disable hysteria-server
 }
 
 hysteriaswitch(){
@@ -451,7 +534,10 @@ changeproxysite(){
     
     inst_site
 
-    sed -i "s#$oldproxysite#$proxysite#g" /etc/caddy/Caddyfile
+    # 注意：原脚本这里的修改伪装网站似乎试图修改 Caddyfile，但并未安装Caddy。
+    # 为了保持原样这里不做干涉，只添加可能缺少的yaml配置变更
+    sed -i "s#$oldproxysite#$proxysite#g" /etc/hysteria/config.yaml 2>/dev/null || true
+    sed -i "s#$oldproxysite#$proxysite#g" /etc/caddy/Caddyfile 2>/dev/null || true
 
     stophysteria && starthysteria
 
@@ -486,8 +572,11 @@ showconf(){
 
 # ================= 新增的 BBR 加速开启函数 =================
 enable_bbr(){
+    # 尝试加载内核模块，Alpine 精简内核下可能需要
+    modprobe tcp_bbr >/dev/null 2>&1 || true
+
     # 检查是否已经开启了 BBR
-    if [[ $(sysctl net.ipv4.tcp_congestion_control | grep bbr) ]]; then
+    if [[ $(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep bbr) ]]; then
         green "=========================================="
         green "检测到 BBR 加速已经开启，无需重复配置！"
         green "=========================================="
@@ -510,7 +599,7 @@ enable_bbr(){
     sysctl -p >/dev/null 2>&1
     
     # 再次验证是否成功
-    if [[ $(sysctl net.ipv4.tcp_congestion_control | grep bbr) ]]; then
+    if [[ $(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep bbr) ]]; then
         green "=========================================="
         green "BBR 加速开启成功！网络吞吐量已优化。"
         green "=========================================="
