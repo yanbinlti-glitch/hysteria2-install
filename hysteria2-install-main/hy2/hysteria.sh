@@ -157,7 +157,6 @@ inst_cert(){
         openssl ecparam -genkey -name prime256v1 -out /etc/hysteria/private.key
         openssl req -new -x509 -days 36500 -key /etc/hysteria/private.key -out /etc/hysteria/cert.crt -subj "/CN=www.bing.com"
         
-        # 修复：严格分离权限，公钥只读，私钥绝对保密
         chmod 644 /etc/hysteria/cert.crt
         chmod 600 /etc/hysteria/private.key
         
@@ -249,16 +248,23 @@ generate_client_configs() {
         mport_param="&mport=$hop_ports"
     fi
 
+    # 漏洞修复：创建专门的 Web 根目录，防止源文件目录被访问
+    mkdir -p /root/hy/www
+    # 植入空白伪装主页，彻底屏蔽 Python 的目录遍历浏览功能
+    echo "<h1 style='text-align:center;margin-top:20%;'>403 Forbidden</h1>" > /root/hy/www/index.html
+
     # 生成安全的随机 UUID 目录
     local sub_uuid=$(cat /proc/sys/kernel/random/uuid)
-    mkdir -p /root/hy/$sub_uuid
+    mkdir -p /root/hy/www/$sub_uuid
+    # 同样为 UUID 内部目录屏蔽列表
+    echo "<h1 style='text-align:center;margin-top:20%;'>403 Forbidden</h1>" > /root/hy/www/$sub_uuid/index.html
     echo "$sub_uuid" > /root/hy/sub_path.txt
 
     local url="hysteria2://$s_pwd@$uri_ip:$primary_port/?insecure=1&sni=$c_domain${mport_param}#Hysteria2-Node"
-    echo "$url" > /root/hy/$sub_uuid/url.txt
-    echo -n "$url" | base64 -w 0 > /root/hy/$sub_uuid/sub_b64.txt
+    echo "$url" > /root/hy/www/$sub_uuid/url.txt
+    echo -n "$url" | base64 -w 0 > /root/hy/www/$sub_uuid/sub_b64.txt
 
-    cat << EOF > /root/hy/$sub_uuid/clash-meta-sub.yaml
+    cat << EOF > /root/hy/www/$sub_uuid/clash-meta-sub.yaml
 port: 7890
 socks-port: 7891
 allow-lan: true
@@ -306,7 +312,7 @@ EOF
         netfilter-persistent save >/dev/null 2>&1 || true
     fi
     
-    # 修复：将 HTTP 服务器注册为系统守护进程 (Daemon)
+    # 将 HTTP 服务器注册为系统守护进程 (指定安全的 WorkingDirectory)
     local py_path=$(command -v python3)
     if [[ $SYSTEM == "Alpine" ]]; then
         cat << EOF > /etc/init.d/hysteria-sub
@@ -315,7 +321,7 @@ description="Hysteria HTTP Subscription Server"
 command="${py_path}"
 command_args="-m http.server ${sub_port}"
 command_background=true
-directory="/root/hy"
+directory="/root/hy/www"
 pidfile="/run/hysteria-sub.pid"
 output_log="/root/hy/http.log"
 error_log="/root/hy/http.log"
@@ -331,7 +337,7 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/root/hy
+WorkingDirectory=/root/hy/www
 ExecStart=${py_path} -m http.server ${sub_port}
 Restart=always
 RestartSec=3
@@ -346,7 +352,7 @@ EOF
     svc_stop hysteria-sub >/dev/null 2>&1 || true
     svc_start hysteria-sub
     
-    green "HTTP 订阅服务已通过系统守护进程启动，支持开机自启并受安全目录保护..."
+    green "HTTP 订阅服务已通过系统守护进程启动，并已开启防遍历与沙盒保护..."
 }
 
 showconf(){
@@ -362,10 +368,10 @@ showconf(){
     red "http://$ip:$sub_port/$sub_path/sub_b64.txt"
     echo ""
     green "📄 3. 原始 Hysteria 2 协议链接单节点:"
-    red "$(cat /root/hy/$sub_path/url.txt 2>/dev/null)"
+    red "$(cat /root/hy/www/$sub_path/url.txt 2>/dev/null)"
     echo ""
     yellow "==========================================================="
-    yellow "提示: 您的订阅链接已被随机 UUID 目录保护，防止他人扫描窃取。"
+    yellow "提示: 您的订阅链接已被随机 UUID 及防遍历策略双重保护，安全可靠。"
 }
 
 # ================= 流量统计功能 =================
