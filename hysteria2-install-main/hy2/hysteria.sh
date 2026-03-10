@@ -48,16 +48,16 @@ fi
 
 # ================= 兼容 OpenRC 和 Systemd 的服务控制 =================
 svc_start() {
-    if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" start; else systemctl start "$1"; fi
+    if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" start >/dev/null 2>&1; else systemctl start "$1" >/dev/null 2>&1; fi
 }
 svc_stop() {
-    if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" stop; else systemctl stop "$1"; fi
+    if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" stop >/dev/null 2>&1; else systemctl stop "$1" >/dev/null 2>&1; fi
 }
 svc_enable() {
-    if [[ $SYSTEM == "Alpine" ]]; then rc-update add "$1" default; else systemctl enable "$1"; fi
+    if [[ $SYSTEM == "Alpine" ]]; then rc-update add "$1" default >/dev/null 2>&1; else systemctl enable "$1" >/dev/null 2>&1; fi
 }
 svc_disable() {
-    if [[ $SYSTEM == "Alpine" ]]; then rc-update del "$1" default; else systemctl disable "$1"; fi
+    if [[ $SYSTEM == "Alpine" ]]; then rc-update del "$1" default >/dev/null 2>&1; else systemctl disable "$1" >/dev/null 2>&1; fi
 }
 # =====================================================================
 
@@ -104,7 +104,6 @@ inst_cert(){
             yellow "请在 Cloudflare 控制台 -> 我的个人资料 -> API 令牌 中获取"
             green "=========================================================="
             read -p "请输入 Cloudflare 账号邮箱 (CF_Email): " cf_email
-            # 修复 4: 明确要求输入 Global API Key，防止小白使用 Token 导致报错
             read -p "请输入 Cloudflare Global API Key (注意: 必须是 Global API Key, 不能用 API 令牌): " cf_key
             
             if [[ -z $cf_email || -z $cf_key ]]; then
@@ -157,8 +156,11 @@ inst_cert(){
         key_path="/etc/hysteria/private.key"
         openssl ecparam -genkey -name prime256v1 -out /etc/hysteria/private.key
         openssl req -new -x509 -days 36500 -key /etc/hysteria/private.key -out /etc/hysteria/cert.crt -subj "/CN=www.bing.com"
-        # 修复 3: 将 777 危险权限修改为 644 安全权限
-        chmod 644 /etc/hysteria/cert.crt /etc/hysteria/private.key
+        
+        # 修复：严格分离权限，公钥只读，私钥绝对保密
+        chmod 644 /etc/hysteria/cert.crt
+        chmod 600 /etc/hysteria/private.key
+        
         hy_domain="www.bing.com"
         domain="www.bing.com"
     fi
@@ -190,10 +192,10 @@ inst_jump(){
         iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport  -j DNAT --to-destination :$port
         ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport  -j DNAT --to-destination :$port
         if [[ $SYSTEM == "Alpine" ]]; then
-            rc-service iptables save || true
-            rc-service ip6tables save || true
+            rc-service iptables save >/dev/null 2>&1 || true
+            rc-service ip6tables save >/dev/null 2>&1 || true
         else
-            netfilter-persistent save
+            netfilter-persistent save >/dev/null 2>&1 || true
         fi
     fi
 }
@@ -223,7 +225,7 @@ inst_site(){
     [[ -z $proxysite ]] && proxysite="en.snu.ac.kr"
 }
 
-# ================= 客户端配置与 HTTP 订阅服务 =================
+# ================= 客户端配置与 HTTP 守护进程 =================
 generate_client_configs() {
     realip
     
@@ -247,7 +249,7 @@ generate_client_configs() {
         mport_param="&mport=$hop_ports"
     fi
 
-    # 修复 2: 引入随机 UUID 作为订阅隐藏目录，防止被他人扫描爆破
+    # 生成安全的随机 UUID 目录
     local sub_uuid=$(cat /proc/sys/kernel/random/uuid)
     mkdir -p /root/hy/$sub_uuid
     echo "$sub_uuid" > /root/hy/sub_path.txt
@@ -293,20 +295,58 @@ EOF
         if [[ $SYSTEM == "Alpine" ]]; then ${PACKAGE_INSTALL[int]} python3; else ${PACKAGE_INSTALL[int]} python3; fi
     fi
 
-    if [[ -f /root/hy/sub_port.txt ]]; then
-        local old_port=$(cat /root/hy/sub_port.txt)
-        pkill -f "python3 -m http.server $old_port"
-    fi
-
     local sub_port=$sub_port_input
     echo "$sub_port" > /root/hy/sub_port.txt
     
-    iptables -I INPUT -p tcp --dport $sub_port -j ACCEPT
+    # 开放订阅端口并确保规则被保存（解决重启丢失）
+    iptables -I INPUT -p tcp --dport $sub_port -j ACCEPT >/dev/null 2>&1
+    if [[ $SYSTEM == "Alpine" ]]; then
+        rc-service iptables save >/dev/null 2>&1 || true
+    else
+        netfilter-persistent save >/dev/null 2>&1 || true
+    fi
     
-    cd /root/hy
-    nohup python3 -m http.server $sub_port > /root/hy/http.log 2>&1 &
-    cd /root
-    green "HTTP 订阅服务已启动，处于随机隐蔽路径中保护..."
+    # 修复：将 HTTP 服务器注册为系统守护进程 (Daemon)
+    local py_path=$(command -v python3)
+    if [[ $SYSTEM == "Alpine" ]]; then
+        cat << EOF > /etc/init.d/hysteria-sub
+#!/sbin/openrc-run
+description="Hysteria HTTP Subscription Server"
+command="${py_path}"
+command_args="-m http.server ${sub_port}"
+command_background=true
+directory="/root/hy"
+pidfile="/run/hysteria-sub.pid"
+output_log="/root/hy/http.log"
+error_log="/root/hy/http.log"
+EOF
+        chmod +x /etc/init.d/hysteria-sub
+        rc-update add hysteria-sub default >/dev/null 2>&1
+    else
+        cat << EOF > /etc/systemd/system/hysteria-sub.service
+[Unit]
+Description=Hysteria HTTP Subscription Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/hy
+ExecStart=${py_path} -m http.server ${sub_port}
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload >/dev/null 2>&1
+        systemctl enable hysteria-sub >/dev/null 2>&1
+    fi
+    
+    svc_stop hysteria-sub >/dev/null 2>&1 || true
+    svc_start hysteria-sub
+    
+    green "HTTP 订阅服务已通过系统守护进程启动，支持开机自启并受安全目录保护..."
 }
 
 showconf(){
@@ -322,13 +362,13 @@ showconf(){
     red "http://$ip:$sub_port/$sub_path/sub_b64.txt"
     echo ""
     green "📄 3. 原始 Hysteria 2 协议链接单节点:"
-    red "$(cat /root/hy/$sub_path/url.txt)"
+    red "$(cat /root/hy/$sub_path/url.txt 2>/dev/null)"
     echo ""
     yellow "==========================================================="
     yellow "提示: 您的订阅链接已被随机 UUID 目录保护，防止他人扫描窃取。"
 }
 
-# ================= 修复 1：更正为合规的 Hysteria 流量统计 API =================
+# ================= 流量统计功能 =================
 check_traffic() {
     if [[ ! -f /etc/hysteria/config.yaml ]]; then
         red "未检测到 Hysteria 2 配置文件，请先安装！"
@@ -346,7 +386,7 @@ trafficStats:
 EOF
         svc_stop hysteria-server
         svc_start hysteria-server
-        sleep 2 # 给点时间让服务完全启动
+        sleep 2
     fi
 
     local traffic_data=$(curl -s http://127.0.0.1:9999/traffic)
@@ -361,7 +401,6 @@ EOF
     else
         echo ""
         green "================ 🚀 Hysteria 2 流量统计 =================="
-        # 解析返回的 JSON 并计算兆字节 (MB)
         echo "$traffic_data" | grep -o '"[^"]*":{[^}]*}' | grep '"tx"' | while read -r line; do
             user=$(echo "$line" | cut -d '"' -f2)
             tx=$(echo "$line" | grep -o '"tx":[0-9]*' | cut -d: -f2)
@@ -485,7 +524,7 @@ quic:
   maxConnReceiveWindow: 33554432
 EOF
 
-    [[ $SYSTEM != "Alpine" ]] && systemctl daemon-reload
+    [[ $SYSTEM != "Alpine" ]] && systemctl daemon-reload >/dev/null 2>&1
     svc_enable hysteria-server
     svc_start hysteria-server
     
@@ -497,19 +536,17 @@ EOF
 }
 
 unsthysteria(){
-    svc_stop hysteria-server
-    svc_disable hysteria-server
-    
-    if [[ -f /root/hy/sub_port.txt ]]; then
-        local old_port=$(cat /root/hy/sub_port.txt)
-        pkill -f "python3 -m http.server $old_port"
-    fi
+    svc_stop hysteria-server >/dev/null 2>&1 || true
+    svc_disable hysteria-server >/dev/null 2>&1 || true
+    svc_stop hysteria-sub >/dev/null 2>&1 || true
+    svc_disable hysteria-sub >/dev/null 2>&1 || true
 
     if [[ $SYSTEM == "Alpine" ]]; then
-        rm -f /etc/init.d/hysteria-server
+        rm -f /etc/init.d/hysteria-server /etc/init.d/hysteria-sub
     else
-        rm -f /lib/systemd/system/hysteria-server.service
-        netfilter-persistent save
+        rm -f /lib/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-sub.service
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        netfilter-persistent save >/dev/null 2>&1 || true
     fi
     rm -rf /usr/local/bin/hysteria /etc/hysteria /root/hy /root/hysteria.sh
     iptables -t nat -F PREROUTING
@@ -519,25 +556,13 @@ unsthysteria(){
 
 starthysteria(){
     svc_start hysteria-server
-    svc_enable hysteria-server
-    
-    if [[ -f /root/hy/sub_port.txt ]]; then
-        local sub_port=$(cat /root/hy/sub_port.txt)
-        cd /root/hy
-        nohup python3 -m http.server $sub_port > /root/hy/http.log 2>&1 &
-        cd /root
-    fi
-    green "Hysteria 2 及订阅服务已启动！"
+    svc_start hysteria-sub
+    green "Hysteria 2 及订阅服务已安全启动！"
 }
 
 stophysteria(){
     svc_stop hysteria-server
-    svc_disable hysteria-server
-    
-    if [[ -f /root/hy/sub_port.txt ]]; then
-        local old_port=$(cat /root/hy/sub_port.txt)
-        pkill -f "python3 -m http.server $old_port"
-    fi
+    svc_stop hysteria-sub
     green "Hysteria 2 及订阅服务已关闭！"
 }
 
@@ -564,7 +589,7 @@ changeconf(){
 }
 
 enable_bbr(){
-    modprobe tcp_bbr || true
+    modprobe tcp_bbr >/dev/null 2>&1 || true
     if [[ $(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep bbr) ]]; then
         green "检测到 BBR 加速已经开启，无需重复配置！"
         sleep 2; menu; return
@@ -574,7 +599,7 @@ enable_bbr(){
     sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
     echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
     echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-    sysctl -p
+    sysctl -p >/dev/null 2>&1
     
     green "BBR 加速开启成功！"
     read -p "按回车键返回主菜单..."
