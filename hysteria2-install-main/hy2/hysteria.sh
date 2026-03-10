@@ -39,11 +39,12 @@ done
 
 [[ -z $SYSTEM ]] && red "目前暂不支持你的VPS的操作系统！" && exit 1
 
+# 保证最基础的 curl 存在，用于后续获取 IP
 if [[ -z $(type -P curl) ]]; then
     if [[ ! $SYSTEM == "CentOS" ]]; then
-        ${PACKAGE_UPDATE[int]}
+        ${PACKAGE_UPDATE[int]} >/dev/null 2>&1
     fi
-    ${PACKAGE_INSTALL[int]} curl
+    ${PACKAGE_INSTALL[int]} curl >/dev/null 2>&1
 fi
 
 # ================= 兼容 OpenRC 和 Systemd 的服务控制 =================
@@ -70,6 +71,81 @@ save_iptables() {
     else
         netfilter-persistent save >/dev/null 2>&1 || true
     fi
+}
+# =====================================================================
+
+# ================= 新增：可视化的系统与前置环境体检 =================
+check_env() {
+    clear
+    yellow "================= 🖥️  系统环境检查 ================="
+    green " 当前操作系统: $SYSTEM"
+    echo ""
+    yellow " 正在检查 Hysteria 2 及附加服务所需的前置依赖包..."
+    
+    local cmds=("curl" "wget" "sudo" "ss" "iptables" "python3" "openssl" "socat")
+    local missing=0
+
+    for cmd in "${cmds[@]}"; do
+        if ! command -v "$cmd" &> /dev/null; then
+            red " ❌ [缺失] $cmd"
+            missing=1
+        else
+            green " ✅ [正常] $cmd 已安装"
+        fi
+    done
+
+    # 单独检测 crontab
+    if ! command -v crontab &> /dev/null; then
+        red " ❌ [缺失] crontab (用于证书自动续期)"
+        missing=1
+    else
+        green " ✅ [正常] crontab 已安装"
+    fi
+
+    # 针对 Debian/Ubuntu 的特殊防火墙持久化工具检测
+    if [[ $SYSTEM == "Debian" || $SYSTEM == "Ubuntu" ]]; then
+        if ! command -v netfilter-persistent &> /dev/null; then
+            red " ❌ [缺失] netfilter-persistent (用于防火墙规则保存)"
+            missing=1
+        else
+            green " ✅ [正常] netfilter-persistent 已安装"
+        fi
+    fi
+
+    if [[ $missing -eq 1 ]]; then
+        echo ""
+        yellow "--------------------------------------------------"
+        yellow " ⏳ 发现缺失前置组件，正在为您自动拉取安装，请稍候..."
+        
+        if [[ ! $SYSTEM == "CentOS" ]]; then
+            ${PACKAGE_UPDATE[int]} >/dev/null 2>&1
+        fi
+        
+        if [[ $SYSTEM == "Alpine" ]]; then
+            ${PACKAGE_INSTALL[int]} curl wget sudo procps iptables ip6tables iproute2 python3 openssl socat cronie >/dev/null 2>&1
+            svc_start crond >/dev/null 2>&1
+            svc_enable crond >/dev/null 2>&1
+        elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" ]]; then
+            ${PACKAGE_INSTALL[int]} curl wget sudo procps iptables iptables-services iproute python3 openssl socat cronie >/dev/null 2>&1
+            svc_start crond >/dev/null 2>&1
+            svc_enable crond >/dev/null 2>&1
+        else
+            # 解决交互式弹窗导致卡住的问题
+            export DEBIAN_FRONTEND=noninteractive
+            ${PACKAGE_INSTALL[int]} curl wget sudo procps iptables-persistent netfilter-persistent iproute2 python3 openssl socat cron >/dev/null 2>&1
+            svc_start cron >/dev/null 2>&1
+            svc_enable cron >/dev/null 2>&1
+        fi
+        
+        green " ✨ 所有前置依赖补全完成！"
+    else
+        echo ""
+        green "--------------------------------------------------"
+        green " 🎉 所有前置依赖检查通过，环境非常完美，无需额外安装！"
+    fi
+    yellow "=================================================="
+    echo ""
+    sleep 2
 }
 # =====================================================================
 
@@ -125,15 +201,6 @@ inst_cert(){
 
             export CF_Email="$cf_email"
             export CF_Key="$cf_key"
-
-            ${PACKAGE_INSTALL[int]} curl wget sudo socat openssl
-            if [[ $SYSTEM == "CentOS" || $SYSTEM == "Alpine" ]]; then
-                ${PACKAGE_INSTALL[int]} cronie
-                svc_start crond && svc_enable crond
-            else
-                ${PACKAGE_INSTALL[int]} cron
-                svc_start cron && svc_enable cron
-            fi
             
             curl https://get.acme.sh | sh -s email=$cf_email
             source ~/.bashrc
@@ -268,7 +335,6 @@ generate_client_configs() {
     mkdir -p /root/hy/www
     echo "<h1 style='text-align:center;margin-top:20%;'>403 Forbidden</h1>" > /root/hy/www/index.html
 
-    # 修复 3: 增加后备方案，防止在极个别精简内核的容器上找不到 UUID 生成器
     local sub_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s%N | md5sum | head -c 16)
     mkdir -p /root/hy/www/$sub_uuid
     echo "<h1 style='text-align:center;margin-top:20%;'>403 Forbidden</h1>" > /root/hy/www/$sub_uuid/index.html
@@ -310,10 +376,6 @@ rules:
   - GEOIP,CN,DIRECT
   - MATCH,🚀 节点选择
 EOF
-
-    if ! command -v python3 &> /dev/null; then
-        if [[ $SYSTEM == "Alpine" ]]; then ${PACKAGE_INSTALL[int]} python3; else ${PACKAGE_INSTALL[int]} python3; fi
-    fi
 
     local sub_port=$sub_port_input
     echo "$sub_port" > /root/hy/sub_port.txt
@@ -438,18 +500,8 @@ EOF
 # =============================================================
 
 insthysteria(){
-    if [[ ! ${SYSTEM} == "CentOS" ]]; then
-        ${PACKAGE_UPDATE[int]}
-    fi
-    
-    # 修复 1: 修正了 Bash 中提取数组时漏写下标 [int] 的问题
-    if [[ $SYSTEM == "Alpine" ]]; then
-        ${PACKAGE_INSTALL[int]} curl wget sudo procps iptables ip6tables iproute2
-    elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" ]]; then
-        ${PACKAGE_INSTALL[int]} curl wget sudo procps iptables iptables-services iproute
-    else
-        ${PACKAGE_INSTALL[int]} curl wget sudo procps iptables-persistent netfilter-persistent iproute2
-    fi
+    # 调用新增的系统环境体检
+    check_env
 
     mkdir -p /etc/hysteria
     
@@ -577,7 +629,6 @@ unsthysteria(){
     svc_stop hysteria-sub >/dev/null 2>&1 || true
     svc_disable hysteria-sub >/dev/null 2>&1 || true
 
-    # 修复 2: 修正清理卸载时 Systemd 配置文件的绝对路径残留问题
     if [[ $SYSTEM == "Alpine" ]]; then
         rm -f /etc/init.d/hysteria-server /etc/init.d/hysteria-sub
     else
