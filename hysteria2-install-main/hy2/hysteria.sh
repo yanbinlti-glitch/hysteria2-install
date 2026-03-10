@@ -46,18 +46,18 @@ if [[ -z $(type -P curl) ]]; then
     ${PACKAGE_INSTALL[int]} curl
 fi
 
-# ================= 兼容 OpenRC 和 Systemd 的服务控制 =================
+# ================= 兼容 OpenRC 和 Systemd 的服务控制 (已移除日志隐藏) =================
 svc_start() {
-    if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" start >/dev/null 2>&1; else systemctl start "$1" >/dev/null 2>&1; fi
+    if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" start; else systemctl start "$1"; fi
 }
 svc_stop() {
-    if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" stop >/dev/null 2>&1; else systemctl stop "$1" >/dev/null 2>&1; fi
+    if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" stop; else systemctl stop "$1"; fi
 }
 svc_enable() {
-    if [[ $SYSTEM == "Alpine" ]]; then rc-update add "$1" default >/dev/null 2>&1; else systemctl enable "$1" >/dev/null 2>&1; fi
+    if [[ $SYSTEM == "Alpine" ]]; then rc-update add "$1" default; else systemctl enable "$1"; fi
 }
 svc_disable() {
-    if [[ $SYSTEM == "Alpine" ]]; then rc-update del "$1" default >/dev/null 2>&1; else systemctl disable "$1" >/dev/null 2>&1; fi
+    if [[ $SYSTEM == "Alpine" ]]; then rc-update del "$1" default; else systemctl disable "$1"; fi
 }
 # =====================================================================
 
@@ -108,7 +108,8 @@ inst_cert(){
                 bash ~/.acme.sh/acme.sh --install-cert -d ${domain} --key-file /root/private.key --fullchain-file /root/cert.crt --ecc
                 if [[ -f /root/cert.crt && -f /root/private.key ]]; then
                     echo $domain > /root/ca.log
-                    sed -i '/--cron/d' /etc/crontab >/dev/null 2>&1
+                    sed -i '/--cron/d' /etc/crontab
+                    # cron 任务的后台执行仍然保持黑洞输出，避免系统发送垃圾邮件
                     echo "0 0 * * * root bash /root/.acme.sh/acme.sh --cron -f >/dev/null 2>&1" >> /etc/crontab
                     green "证书申请成功!"
                     hy_domain=$domain
@@ -137,7 +138,7 @@ inst_cert(){
 }
 
 inst_port(){
-    iptables -t nat -F PREROUTING >/dev/null 2>&1
+    iptables -t nat -F PREROUTING
     read -p "设置 Hysteria 2 节点端口 [1-65535]（回车随机）：" port
     [[ -z $port ]] && port=$(shuf -i 2000-65535 -n 1)
     until [[ -z $(ss -tunlp | grep -w udp | awk '{print $5}' | sed 's/.*://g' | grep -w "$port") ]]; do
@@ -162,10 +163,10 @@ inst_jump(){
         iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport  -j DNAT --to-destination :$port
         ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport  -j DNAT --to-destination :$port
         if [[ $SYSTEM == "Alpine" ]]; then
-            rc-service iptables save >/dev/null 2>&1 || true
-            rc-service ip6tables save >/dev/null 2>&1 || true
+            rc-service iptables save || true
+            rc-service ip6tables save || true
         else
-            netfilter-persistent save >/dev/null 2>&1
+            netfilter-persistent save
         fi
     fi
 }
@@ -266,7 +267,7 @@ EOF
     # 杀死旧的 HTTP 服务
     if [[ -f /root/hy/sub_port.txt ]]; then
         local old_port=$(cat /root/hy/sub_port.txt)
-        pkill -f "python3 -m http.server $old_port" >/dev/null 2>&1
+        pkill -f "python3 -m http.server $old_port"
     fi
 
     # 使用用户刚才输入的全局端口变量
@@ -274,11 +275,13 @@ EOF
     echo "$sub_port" > /root/hy/sub_port.txt
     
     # 允许 HTTP 端口通过防火墙 (如果开启了iptables)
-    iptables -I INPUT -p tcp --dport $sub_port -j ACCEPT >/dev/null 2>&1
+    iptables -I INPUT -p tcp --dport $sub_port -j ACCEPT
     
     cd /root/hy
-    nohup python3 -m http.server $sub_port >/dev/null 2>&1 &
+    # 将日志输出到 http.log 中，以免刷屏干扰菜单显示
+    nohup python3 -m http.server $sub_port > /root/hy/http.log 2>&1 &
     cd /root
+    green "HTTP 订阅服务日志保存在: /root/hy/http.log"
 }
 
 showconf(){
@@ -347,7 +350,7 @@ EOF
 
     inst_cert
     inst_port
-    inst_sub_port # <----- 这里加入了提示配置 HTTP 端口的步骤
+    inst_sub_port # 提示配置 HTTP 端口的步骤
     inst_pwd
     inst_site
 
@@ -420,17 +423,17 @@ unsthysteria(){
     # 杀掉 Python HTTP 服务
     if [[ -f /root/hy/sub_port.txt ]]; then
         local old_port=$(cat /root/hy/sub_port.txt)
-        pkill -f "python3 -m http.server $old_port" >/dev/null 2>&1
+        pkill -f "python3 -m http.server $old_port"
     fi
 
     if [[ $SYSTEM == "Alpine" ]]; then
         rm -f /etc/init.d/hysteria-server
     else
         rm -f /lib/systemd/system/hysteria-server.service
-        netfilter-persistent save >/dev/null 2>&1
+        netfilter-persistent save
     fi
     rm -rf /usr/local/bin/hysteria /etc/hysteria /root/hy /root/hysteria.sh
-    iptables -t nat -F PREROUTING >/dev/null 2>&1
+    iptables -t nat -F PREROUTING
 
     green "Hysteria 2 已彻底卸载完成！"
 }
@@ -443,7 +446,7 @@ starthysteria(){
     if [[ -f /root/hy/sub_port.txt ]]; then
         local sub_port=$(cat /root/hy/sub_port.txt)
         cd /root/hy
-        nohup python3 -m http.server $sub_port >/dev/null 2>&1 &
+        nohup python3 -m http.server $sub_port > /root/hy/http.log 2>&1 &
         cd /root
     fi
     green "Hysteria 2 及订阅服务已启动！"
@@ -456,7 +459,7 @@ stophysteria(){
     # 停止 HTTP 服务
     if [[ -f /root/hy/sub_port.txt ]]; then
         local old_port=$(cat /root/hy/sub_port.txt)
-        pkill -f "python3 -m http.server $old_port" >/dev/null 2>&1
+        pkill -f "python3 -m http.server $old_port"
     fi
     green "Hysteria 2 及订阅服务已关闭！"
 }
@@ -484,7 +487,7 @@ changeconf(){
 }
 
 enable_bbr(){
-    modprobe tcp_bbr >/dev/null 2>&1 || true
+    modprobe tcp_bbr || true
     if [[ $(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep bbr) ]]; then
         green "检测到 BBR 加速已经开启，无需重复配置！"
         sleep 2; menu; return
@@ -494,7 +497,7 @@ enable_bbr(){
     sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
     echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
     echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-    sysctl -p >/dev/null 2>&1
+    sysctl -p
     
     green "BBR 加速开启成功！"
     read -p "按回车键返回主菜单..."
