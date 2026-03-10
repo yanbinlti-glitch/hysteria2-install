@@ -59,6 +59,19 @@ svc_enable() {
 svc_disable() {
     if [[ $SYSTEM == "Alpine" ]]; then rc-update del "$1" default >/dev/null 2>&1; else systemctl disable "$1" >/dev/null 2>&1; fi
 }
+
+# 修复 BUG 2: 统筹处理各系统防火墙持久化问题
+save_iptables() {
+    if [[ $SYSTEM == "Alpine" ]]; then
+        rc-service iptables save >/dev/null 2>&1 || true
+        rc-service ip6tables save >/dev/null 2>&1 || true
+    elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" ]]; then
+        service iptables save >/dev/null 2>&1 || true
+        service ip6tables save >/dev/null 2>&1 || true
+    else
+        netfilter-persistent save >/dev/null 2>&1 || true
+    fi
+}
 # =====================================================================
 
 realip(){
@@ -137,6 +150,11 @@ inst_cert(){
                 echo $domain > /root/ca.log
                 sed -i '/--cron/d' /etc/crontab
                 echo "0 0 * * * root bash /root/.acme.sh/acme.sh --cron -f >/dev/null 2>&1" >> /etc/crontab
+                
+                # 修复 BUG 3: 强制赋予 Acme 生成私钥最严苛的安全权限
+                chmod 644 /root/cert.crt
+                chmod 600 /root/private.key
+                
                 green "证书申请成功！已保存至 /root/ 目录下。"
                 hy_domain=$domain
             else
@@ -177,9 +195,12 @@ inst_port(){
     done
     yellow "将在 Hysteria 2 节点使用的端口是：$port"
     
-    # 【修复漏洞2】：自动开放 Hysteria 2 的 UDP 主端口，解决被内部防火墙拦截的问题
+    # 放行 UDP 主端口
     iptables -I INPUT -p udp --dport $port -j ACCEPT >/dev/null 2>&1
     ip6tables -I INPUT -p udp --dport $port -j ACCEPT >/dev/null 2>&1
+    
+    # 修复 BUG 1: 不管是否使用端口跳跃，这里必须强制保存防火墙规则，防重启失效
+    save_iptables
 
     inst_jump
 }
@@ -196,12 +217,8 @@ inst_jump(){
         iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport  -j DNAT --to-destination :$port
         ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport  -j DNAT --to-destination :$port
         
-        if [[ $SYSTEM == "Alpine" ]]; then
-            rc-service iptables save >/dev/null 2>&1 || true
-            rc-service ip6tables save >/dev/null 2>&1 || true
-        else
-            netfilter-persistent save >/dev/null 2>&1 || true
-        fi
+        # 保存跳跃规则
+        save_iptables
     fi
 }
 
@@ -307,13 +324,9 @@ EOF
     local sub_port=$sub_port_input
     echo "$sub_port" > /root/hy/sub_port.txt
     
-    # 放行 HTTP 端口
+    # 放行 HTTP 端口并保存规则
     iptables -I INPUT -p tcp --dport $sub_port -j ACCEPT >/dev/null 2>&1
-    if [[ $SYSTEM == "Alpine" ]]; then
-        rc-service iptables save >/dev/null 2>&1 || true
-    else
-        netfilter-persistent save >/dev/null 2>&1 || true
-    fi
+    save_iptables
     
     local py_path=$(command -v python3)
     if [[ $SYSTEM == "Alpine" ]]; then
@@ -436,15 +449,17 @@ insthysteria(){
         ${PACKAGE_UPDATE}
     fi
     
+    # 修复 BUG 2: 彻底解决 CentOS 下防火墙依赖缺失的问题
     if [[ $SYSTEM == "Alpine" ]]; then
         ${PACKAGE_INSTALL} curl wget sudo procps iptables ip6tables iproute2
+    elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" ]]; then
+        ${PACKAGE_INSTALL} curl wget sudo procps iptables iptables-services iproute
     else
-        ${PACKAGE_INSTALL} curl wget sudo procps iptables-persistent netfilter-persistent
+        ${PACKAGE_INSTALL} curl wget sudo procps iptables-persistent netfilter-persistent iproute2
     fi
 
     mkdir -p /etc/hysteria
     
-    # 【修复漏洞1】：全部系统统一从官方 Github 仓库拉取二进制文件，彻底移除第三方不受控的安全隐患脚本
     green "正在从 Apernet 官方仓库下载 Hysteria 2 二进制核心..."
     arch=$(uname -m)
     case $arch in
@@ -454,7 +469,6 @@ insthysteria(){
         *) red "不支持的架构: $arch" && exit 1 ;;
     esac
     
-    # 动态获取最新版本号
     hy_ver=$(curl -sL "https://api.github.com/repos/apernet/hysteria/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     [[ -z $hy_ver ]] && hy_ver="app/v2.4.0"
     
@@ -465,7 +479,6 @@ insthysteria(){
     fi
     chmod +x /usr/local/bin/hysteria
     
-    # 自动为主流系统编写原生 Systemd / OpenRC 守护配置
     if [[ $SYSTEM == "Alpine" ]]; then
         cat << 'EOF' > /etc/init.d/hysteria-server
 #!/sbin/openrc-run
@@ -576,11 +589,10 @@ unsthysteria(){
     else
         rm -f /lib/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-sub.service
         systemctl daemon-reload >/dev/null 2>&1 || true
-        netfilter-persistent save >/dev/null 2>&1 || true
+        save_iptables
     fi
     rm -rf /usr/local/bin/hysteria /etc/hysteria /root/hy /root/hysteria.sh
 
-    # 【修复漏洞3】：移除了毁灭性的 iptables -t nat -F PREROUTING，防止让服务器里的 Docker 和建站应用全军覆没
     green "Hysteria 2 服务及相关文件已彻底卸载完成！"
     yellow "如果你开启了端口跳跃，端口转发规则将保留在系统中，以免误删您的 Docker 规则。您可以重启服务器或手动使用 iptables -t nat -D 清理。"
 }
