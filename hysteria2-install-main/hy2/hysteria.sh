@@ -46,7 +46,7 @@ if [[ -z $(type -P curl) ]]; then
     ${PACKAGE_INSTALL[int]} curl
 fi
 
-# ================= 兼容 OpenRC 和 Systemd 的服务控制 (已移除日志隐藏) =================
+# ================= 兼容 OpenRC 和 Systemd 的服务控制 =================
 svc_start() {
     if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" start; else systemctl start "$1"; fi
 }
@@ -104,7 +104,8 @@ inst_cert(){
             yellow "请在 Cloudflare 控制台 -> 我的个人资料 -> API 令牌 中获取"
             green "=========================================================="
             read -p "请输入 Cloudflare 账号邮箱 (CF_Email): " cf_email
-            read -p "请输入 Cloudflare Global API Key (CF_Key): " cf_key
+            # 修复 4: 明确要求输入 Global API Key，防止小白使用 Token 导致报错
+            read -p "请输入 Cloudflare Global API Key (注意: 必须是 Global API Key, 不能用 API 令牌): " cf_key
             
             if [[ -z $cf_email || -z $cf_key ]]; then
                 red "邮箱或 API Key 不能为空，无法继续申请证书！"
@@ -140,7 +141,7 @@ inst_cert(){
                 green "证书申请成功！已保存至 /root/ 目录下。"
                 hy_domain=$domain
             else
-                red "证书申请失败！请检查你的 Cloudflare 邮箱和 API Key 是否正确，或者查看终端报错信息。"
+                red "证书申请失败！请检查你的 Cloudflare 邮箱和 Global API Key 是否正确，或者查看终端报错信息。"
                 exit 1
             fi
         fi
@@ -156,7 +157,8 @@ inst_cert(){
         key_path="/etc/hysteria/private.key"
         openssl ecparam -genkey -name prime256v1 -out /etc/hysteria/private.key
         openssl req -new -x509 -days 36500 -key /etc/hysteria/private.key -out /etc/hysteria/cert.crt -subj "/CN=www.bing.com"
-        chmod 777 /etc/hysteria/cert.crt /etc/hysteria/private.key
+        # 修复 3: 将 777 危险权限修改为 644 安全权限
+        chmod 644 /etc/hysteria/cert.crt /etc/hysteria/private.key
         hy_domain="www.bing.com"
         domain="www.bing.com"
     fi
@@ -245,11 +247,16 @@ generate_client_configs() {
         mport_param="&mport=$hop_ports"
     fi
 
-    local url="hysteria2://$s_pwd@$uri_ip:$primary_port/?insecure=1&sni=$c_domain${mport_param}#Hysteria2-Node"
-    echo "$url" > /root/hy/url.txt
-    echo -n "$url" | base64 -w 0 > /root/hy/sub_b64.txt
+    # 修复 2: 引入随机 UUID 作为订阅隐藏目录，防止被他人扫描爆破
+    local sub_uuid=$(cat /proc/sys/kernel/random/uuid)
+    mkdir -p /root/hy/$sub_uuid
+    echo "$sub_uuid" > /root/hy/sub_path.txt
 
-    cat << EOF > /root/hy/clash-meta-sub.yaml
+    local url="hysteria2://$s_pwd@$uri_ip:$primary_port/?insecure=1&sni=$c_domain${mport_param}#Hysteria2-Node"
+    echo "$url" > /root/hy/$sub_uuid/url.txt
+    echo -n "$url" | base64 -w 0 > /root/hy/$sub_uuid/sub_b64.txt
+
+    cat << EOF > /root/hy/$sub_uuid/clash-meta-sub.yaml
 port: 7890
 socks-port: 7891
 allow-lan: true
@@ -299,28 +306,30 @@ EOF
     cd /root/hy
     nohup python3 -m http.server $sub_port > /root/hy/http.log 2>&1 &
     cd /root
-    green "HTTP 订阅服务日志保存在: /root/hy/http.log"
+    green "HTTP 订阅服务已启动，处于随机隐蔽路径中保护..."
 }
 
 showconf(){
     local ip=$(curl -s4m8 ip.sb -k) || ip=$(curl -s6m8 ip.sb -k)
     local sub_port=$(cat /root/hy/sub_port.txt 2>/dev/null)
+    local sub_path=$(cat /root/hy/sub_path.txt 2>/dev/null)
     
     yellow "================ Hysteria 2 全平台订阅链接 ================"
     green "🎯 1. Clash Meta 专属配置订阅链接 (推荐 Clash Verge 一键导入):"
-    red "http://$ip:$sub_port/clash-meta-sub.yaml"
+    red "http://$ip:$sub_port/$sub_path/clash-meta-sub.yaml"
     echo ""
     green "🔗 2. 通用 Base64 订阅链接 (适用 v2rayN/Shadowrocket 等):"
-    red "http://$ip:$sub_port/sub_b64.txt"
+    red "http://$ip:$sub_port/$sub_path/sub_b64.txt"
     echo ""
     green "📄 3. 原始 Hysteria 2 协议链接单节点:"
-    red "$(cat /root/hy/url.txt)"
+    red "$(cat /root/hy/$sub_path/url.txt)"
     echo ""
     yellow "==========================================================="
+    yellow "提示: 您的订阅链接已被随机 UUID 目录保护，防止他人扫描窃取。"
 }
 
-# ================= 新增：查看在线连接设备数量功能 =================
-check_online() {
+# ================= 修复 1：更正为合规的 Hysteria 流量统计 API =================
+check_traffic() {
     if [[ ! -f /etc/hysteria/config.yaml ]]; then
         red "未检测到 Hysteria 2 配置文件，请先安装！"
         sleep 2
@@ -328,9 +337,8 @@ check_online() {
         return
     fi
     
-    # 动态检测并开启 trafficStats 流量统计API
     if ! grep -q "trafficStats:" /etc/hysteria/config.yaml; then
-        green "正在为 Hysteria 2 自动开启流量统计 API 以获取在线人数..."
+        green "正在为 Hysteria 2 自动开启流量统计 API 以获取数据..."
         cat << EOF >> /etc/hysteria/config.yaml
 
 trafficStats:
@@ -341,22 +349,31 @@ EOF
         sleep 2 # 给点时间让服务完全启动
     fi
 
-    # 请求 Hysteria 本地的状态接口
-    local online_data=$(curl -s http://127.0.0.1:9999/online)
+    local traffic_data=$(curl -s http://127.0.0.1:9999/traffic)
     
-    if [[ -z "$online_data" || "$online_data" =~ "404" ]]; then
+    if [[ -z "$traffic_data" || "$traffic_data" =~ "404" ]]; then
         red "获取数据失败。请检查 Hysteria 2 服务是否运行正常 ( systemctl status hysteria-server )。"
-    elif [[ "$online_data" == "{}" ]]; then
+    elif [[ ! "$traffic_data" =~ '"tx"' ]]; then
         echo ""
-        green "================ 🚀 Hysteria 2 在线设备 =================="
-        yellow "当前没有任何设备连接。"
+        green "================ 🚀 Hysteria 2 流量统计 =================="
+        yellow "当前节点没有任何流量消耗记录。"
         green "========================================================"
     else
         echo ""
-        green "================ 🚀 Hysteria 2 在线设备 =================="
-        # 解析返回的 JSON (形如 {"your_password": 2}) 并输出
-        echo "$online_data" | grep -o '"[^"]*": *[0-9]*' | tr -d '"' | while IFS=: read -r user count; do
-            echo -e "  ➡️  客户端认证密码: ${GREEN}${user}${PLAIN} \t| 当前连接设备数: ${YELLOW}${count}${PLAIN}"
+        green "================ 🚀 Hysteria 2 流量统计 =================="
+        # 解析返回的 JSON 并计算兆字节 (MB)
+        echo "$traffic_data" | grep -o '"[^"]*":{[^}]*}' | grep '"tx"' | while read -r line; do
+            user=$(echo "$line" | cut -d '"' -f2)
+            tx=$(echo "$line" | grep -o '"tx":[0-9]*' | cut -d: -f2)
+            rx=$(echo "$line" | grep -o '"rx":[0-9]*' | cut -d: -f2)
+            
+            [[ -z $tx ]] && tx=0
+            [[ -z $rx ]] && rx=0
+            
+            tx_mb=$(awk "BEGIN {printf \"%.2f\", $tx/1048576}")
+            rx_mb=$(awk "BEGIN {printf \"%.2f\", $rx/1048576}")
+            
+            echo -e "  ➡️  客户端密码: ${GREEN}${user}${PLAIN} \t| ⬆️ 发送: ${YELLOW}${tx_mb} MB${PLAIN} \t| ⬇️ 接收: ${YELLOW}${rx_mb} MB${PLAIN}"
         done
         green "========================================================"
     fi
@@ -576,7 +593,7 @@ menu() {
     echo -e " 3. 关闭、开启、重启服务"
     echo -e " 4. 显示 Hysteria 2 订阅链接"
     echo -e " ${YELLOW}5. 开启 BBR 网络加速 (推荐)${PLAIN}"
-    echo -e " ${GREEN}6. 查看当前连接人数 (在线设备)${PLAIN}"
+    echo -e " ${GREEN}6. 查看当前用户流量消耗状态${PLAIN}"
     echo " ------------------------------------------------------------"
     echo -e " 0. 退出脚本"
     echo ""
@@ -587,7 +604,7 @@ menu() {
         3 ) hysteriaswitch ;;
         4 ) showconf ;;
         5 ) enable_bbr ;;
-        6 ) check_online ;;
+        6 ) check_traffic ;;
         0 ) exit 0 ;;
         * ) exit 1 ;;
     esac
