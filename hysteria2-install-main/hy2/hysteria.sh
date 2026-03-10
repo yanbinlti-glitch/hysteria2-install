@@ -69,7 +69,7 @@ inst_cert(){
     green "Hysteria 2 协议证书申请方式如下："
     echo ""
     echo -e " ${GREEN}1.${PLAIN} 必应自签证书 ${YELLOW}（默认）${PLAIN}"
-    echo -e " ${GREEN}2.${PLAIN} Acme 脚本自动申请"
+    echo -e " ${GREEN}2.${PLAIN} Acme 脚本申请 ${YELLOW}(Cloudflare DNS API 验证)${PLAIN}"
     echo -e " ${GREEN}3.${PLAIN} 自定义证书路径"
     echo ""
     read -rp "请输入选项 [1-3]: " certInput
@@ -85,37 +85,62 @@ inst_cert(){
             realip
             read -p "请输入需要申请证书的域名：" domain
             [[ -z $domain ]] && red "未输入域名，无法执行操作！" && exit 1
-            green "已输入的域名：$domain" && sleep 1
+            green "已输入的域名：$domain"
+            
             domainIP=$(curl -sm8 ipget.net/?ip="${domain}")
-            if [[ $domainIP == $ip ]]; then
-                ${PACKAGE_INSTALL[int]} curl wget sudo socat openssl
-                if [[ $SYSTEM == "CentOS" || $SYSTEM == "Alpine" ]]; then
-                    ${PACKAGE_INSTALL[int]} cronie
-                    svc_start crond && svc_enable crond
-                else
-                    ${PACKAGE_INSTALL[int]} cron
-                    svc_start cron && svc_enable cron
+            if [[ $domainIP != $ip ]]; then
+                yellow "警告: 当前域名解析的 IP ($domainIP) 与当前 VPS 的真实 IP ($ip) 不匹配！"
+                yellow "虽然 DNS 验证可以成功申请证书，但 Hysteria 2 节点必须使用真实 IP 直连。"
+                yellow "请确保你的 Cloudflare 已关闭小云朵 (DNS Only)，否则客户端无法连接。"
+                read -p "是否确认并继续申请证书？(y/n) [默认: y]: " force_cert
+                [[ -z $force_cert ]] && force_cert="y"
+                if [[ $force_cert != "y" && $force_cert != "Y" ]]; then
+                    exit 1
                 fi
-                curl https://get.acme.sh | sh -s email=$(date +%s%N | md5sum | cut -c 1-16)@gmail.com
-                source ~/.bashrc
-                bash ~/.acme.sh/acme.sh --upgrade --auto-upgrade
-                bash ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
-                if [[ -n $(echo $ip | grep ":") ]]; then
-                    bash ~/.acme.sh/acme.sh --issue -d ${domain} --standalone -k ec-256 --listen-v6 --insecure
-                else
-                    bash ~/.acme.sh/acme.sh --issue -d ${domain} --standalone -k ec-256 --insecure
-                fi
-                bash ~/.acme.sh/acme.sh --install-cert -d ${domain} --key-file /root/private.key --fullchain-file /root/cert.crt --ecc
-                if [[ -f /root/cert.crt && -f /root/private.key ]]; then
-                    echo $domain > /root/ca.log
-                    sed -i '/--cron/d' /etc/crontab
-                    # cron 任务的后台执行仍然保持黑洞输出，避免系统发送垃圾邮件
-                    echo "0 0 * * * root bash /root/.acme.sh/acme.sh --cron -f >/dev/null 2>&1" >> /etc/crontab
-                    green "证书申请成功!"
-                    hy_domain=$domain
-                fi
+            fi
+
+            green "=========================================================="
+            yellow "准备使用 Cloudflare DNS API 申请证书"
+            yellow "请在 Cloudflare 控制台 -> 我的个人资料 -> API 令牌 中获取"
+            green "=========================================================="
+            read -p "请输入 Cloudflare 账号邮箱 (CF_Email): " cf_email
+            read -p "请输入 Cloudflare Global API Key (CF_Key): " cf_key
+            
+            if [[ -z $cf_email || -z $cf_key ]]; then
+                red "邮箱或 API Key 不能为空，无法继续申请证书！"
+                exit 1
+            fi
+
+            export CF_Email="$cf_email"
+            export CF_Key="$cf_key"
+
+            ${PACKAGE_INSTALL[int]} curl wget sudo socat openssl
+            if [[ $SYSTEM == "CentOS" || $SYSTEM == "Alpine" ]]; then
+                ${PACKAGE_INSTALL[int]} cronie
+                svc_start crond && svc_enable crond
             else
-                red "域名解析IP与当前VPS的IP不匹配！"
+                ${PACKAGE_INSTALL[int]} cron
+                svc_start cron && svc_enable cron
+            fi
+            
+            curl https://get.acme.sh | sh -s email=$cf_email
+            source ~/.bashrc
+            bash ~/.acme.sh/acme.sh --upgrade --auto-upgrade
+            bash ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
+            
+            green "正在通过 Cloudflare DNS API 验证域名所有权，这可能需要 1-3 分钟，请耐心等待..."
+            bash ~/.acme.sh/acme.sh --issue --dns dns_cf -d ${domain} -k ec-256
+            
+            bash ~/.acme.sh/acme.sh --install-cert -d ${domain} --key-file /root/private.key --fullchain-file /root/cert.crt --ecc
+            
+            if [[ -f /root/cert.crt && -f /root/private.key ]]; then
+                echo $domain > /root/ca.log
+                sed -i '/--cron/d' /etc/crontab
+                echo "0 0 * * * root bash /root/.acme.sh/acme.sh --cron -f >/dev/null 2>&1" >> /etc/crontab
+                green "证书申请成功！已保存至 /root/ 目录下。"
+                hy_domain=$domain
+            else
+                red "证书申请失败！请检查你的 Cloudflare 邮箱和 API Key 是否正确，或者查看终端报错信息。"
                 exit 1
             fi
         fi
@@ -220,12 +245,10 @@ generate_client_configs() {
         mport_param="&mport=$hop_ports"
     fi
 
-    # 1. 基础链接
     local url="hysteria2://$s_pwd@$uri_ip:$primary_port/?insecure=1&sni=$c_domain${mport_param}#Hysteria2-Node"
     echo "$url" > /root/hy/url.txt
     echo -n "$url" | base64 -w 0 > /root/hy/sub_b64.txt
 
-    # 2. 生成完整版 Clash Meta 订阅文件
     cat << EOF > /root/hy/clash-meta-sub.yaml
 port: 7890
 socks-port: 7891
@@ -259,26 +282,21 @@ rules:
   - MATCH,🚀 节点选择
 EOF
 
-    # 3. 开启 Python HTTP 订阅服务
     if ! command -v python3 &> /dev/null; then
         if [[ $SYSTEM == "Alpine" ]]; then ${PACKAGE_INSTALL[int]} python3; else ${PACKAGE_INSTALL[int]} python3; fi
     fi
 
-    # 杀死旧的 HTTP 服务
     if [[ -f /root/hy/sub_port.txt ]]; then
         local old_port=$(cat /root/hy/sub_port.txt)
         pkill -f "python3 -m http.server $old_port"
     fi
 
-    # 使用用户刚才输入的全局端口变量
     local sub_port=$sub_port_input
     echo "$sub_port" > /root/hy/sub_port.txt
     
-    # 允许 HTTP 端口通过防火墙 (如果开启了iptables)
     iptables -I INPUT -p tcp --dport $sub_port -j ACCEPT
     
     cd /root/hy
-    # 将日志输出到 http.log 中，以免刷屏干扰菜单显示
     nohup python3 -m http.server $sub_port > /root/hy/http.log 2>&1 &
     cd /root
     green "HTTP 订阅服务日志保存在: /root/hy/http.log"
@@ -289,20 +307,63 @@ showconf(){
     local sub_port=$(cat /root/hy/sub_port.txt 2>/dev/null)
     
     yellow "================ Hysteria 2 全平台订阅链接 ================"
-    
     green "🎯 1. Clash Meta 专属配置订阅链接 (推荐 Clash Verge 一键导入):"
     red "http://$ip:$sub_port/clash-meta-sub.yaml"
     echo ""
-    
     green "🔗 2. 通用 Base64 订阅链接 (适用 v2rayN/Shadowrocket 等):"
     red "http://$ip:$sub_port/sub_b64.txt"
     echo ""
-    
     green "📄 3. 原始 Hysteria 2 协议链接单节点:"
     red "$(cat /root/hy/url.txt)"
     echo ""
     yellow "==========================================================="
-    yellow "提示: 以上订阅链接直接由您的 VPS 提供，安全且私密。"
+}
+
+# ================= 新增：查看在线连接设备数量功能 =================
+check_online() {
+    if [[ ! -f /etc/hysteria/config.yaml ]]; then
+        red "未检测到 Hysteria 2 配置文件，请先安装！"
+        sleep 2
+        menu
+        return
+    fi
+    
+    # 动态检测并开启 trafficStats 流量统计API
+    if ! grep -q "trafficStats:" /etc/hysteria/config.yaml; then
+        green "正在为 Hysteria 2 自动开启流量统计 API 以获取在线人数..."
+        cat << EOF >> /etc/hysteria/config.yaml
+
+trafficStats:
+  listen: 127.0.0.1:9999
+EOF
+        svc_stop hysteria-server
+        svc_start hysteria-server
+        sleep 2 # 给点时间让服务完全启动
+    fi
+
+    # 请求 Hysteria 本地的状态接口
+    local online_data=$(curl -s http://127.0.0.1:9999/online)
+    
+    if [[ -z "$online_data" || "$online_data" =~ "404" ]]; then
+        red "获取数据失败。请检查 Hysteria 2 服务是否运行正常 ( systemctl status hysteria-server )。"
+    elif [[ "$online_data" == "{}" ]]; then
+        echo ""
+        green "================ 🚀 Hysteria 2 在线设备 =================="
+        yellow "当前没有任何设备连接。"
+        green "========================================================"
+    else
+        echo ""
+        green "================ 🚀 Hysteria 2 在线设备 =================="
+        # 解析返回的 JSON (形如 {"your_password": 2}) 并输出
+        echo "$online_data" | grep -o '"[^"]*": *[0-9]*' | tr -d '"' | while IFS=: read -r user count; do
+            echo -e "  ➡️  客户端认证密码: ${GREEN}${user}${PLAIN} \t| 当前连接设备数: ${YELLOW}${count}${PLAIN}"
+        done
+        green "========================================================"
+    fi
+    
+    echo ""
+    read -p "按回车键返回主菜单..."
+    menu
 }
 # =============================================================
 
@@ -350,7 +411,7 @@ EOF
 
     inst_cert
     inst_port
-    inst_sub_port # 提示配置 HTTP 端口的步骤
+    inst_sub_port
     inst_pwd
     inst_site
 
@@ -376,6 +437,9 @@ masquerade:
   proxy:
     url: https://$proxysite
     rewriteHost: true
+
+trafficStats:
+  listen: 127.0.0.1:9999
 EOF
 
     if [[ -n $firstport ]]; then
@@ -408,7 +472,6 @@ EOF
     svc_enable hysteria-server
     svc_start hysteria-server
     
-    # 生成各端配置并启动 HTTP 订阅服务
     generate_client_configs
     
     red "======================================================================"
@@ -420,7 +483,6 @@ unsthysteria(){
     svc_stop hysteria-server
     svc_disable hysteria-server
     
-    # 杀掉 Python HTTP 服务
     if [[ -f /root/hy/sub_port.txt ]]; then
         local old_port=$(cat /root/hy/sub_port.txt)
         pkill -f "python3 -m http.server $old_port"
@@ -442,7 +504,6 @@ starthysteria(){
     svc_start hysteria-server
     svc_enable hysteria-server
     
-    # 重启 HTTP 服务
     if [[ -f /root/hy/sub_port.txt ]]; then
         local sub_port=$(cat /root/hy/sub_port.txt)
         cd /root/hy
@@ -456,7 +517,6 @@ stophysteria(){
     svc_stop hysteria-server
     svc_disable hysteria-server
     
-    # 停止 HTTP 服务
     if [[ -f /root/hy/sub_port.txt ]]; then
         local old_port=$(cat /root/hy/sub_port.txt)
         pkill -f "python3 -m http.server $old_port"
@@ -516,16 +576,18 @@ menu() {
     echo -e " 3. 关闭、开启、重启服务"
     echo -e " 4. 显示 Hysteria 2 订阅链接"
     echo -e " ${YELLOW}5. 开启 BBR 网络加速 (推荐)${PLAIN}"
+    echo -e " ${GREEN}6. 查看当前连接人数 (在线设备)${PLAIN}"
     echo " ------------------------------------------------------------"
     echo -e " 0. 退出脚本"
     echo ""
-    read -rp "请输入选项 [0-5]: " menuInput
+    read -rp "请输入选项 [0-6]: " menuInput
     case $menuInput in
         1 ) insthysteria ;;
         2 ) unsthysteria ;;
         3 ) hysteriaswitch ;;
         4 ) showconf ;;
         5 ) enable_bbr ;;
+        6 ) check_online ;;
         0 ) exit 0 ;;
         * ) exit 1 ;;
     esac
