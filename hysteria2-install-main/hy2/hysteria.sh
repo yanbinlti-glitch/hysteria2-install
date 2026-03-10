@@ -39,7 +39,6 @@ done
 
 [[ -z $SYSTEM ]] && red "目前暂不支持你的VPS的操作系统！" && exit 1
 
-# 保证最基础的 curl 存在，用于后续获取 IP
 if [[ -z $(type -P curl) ]]; then
     if [[ ! $SYSTEM == "CentOS" ]]; then
         ${PACKAGE_UPDATE[int]} >/dev/null 2>&1
@@ -72,7 +71,6 @@ save_iptables() {
         netfilter-persistent save >/dev/null 2>&1 || true
     fi
 }
-# =====================================================================
 
 # ================= 系统环境与前置检查 =================
 check_env() {
@@ -94,7 +92,6 @@ check_env() {
         fi
     done
 
-    # 单独检测 crontab
     if ! command -v crontab &> /dev/null; then
         red " ❌ [缺失] crontab (用于证书自动续期)"
         missing=1
@@ -102,7 +99,6 @@ check_env() {
         green " ✅ [正常] crontab 已安装"
     fi
 
-    # 针对 Debian/Ubuntu 的特殊防火墙持久化工具检测
     if [[ $SYSTEM == "Debian" || $SYSTEM == "Ubuntu" ]]; then
         if ! command -v netfilter-persistent &> /dev/null; then
             red " ❌ [缺失] netfilter-persistent (用于防火墙规则保存)"
@@ -130,7 +126,6 @@ check_env() {
             svc_start crond >/dev/null 2>&1
             svc_enable crond >/dev/null 2>&1
         else
-            # 解决交互式弹窗导致卡住的问题
             export DEBIAN_FRONTEND=noninteractive
             ${PACKAGE_INSTALL[int]} curl wget sudo procps iptables-persistent netfilter-persistent iproute2 python3 openssl socat cron >/dev/null 2>&1
             svc_start cron >/dev/null 2>&1
@@ -147,7 +142,6 @@ check_env() {
     echo ""
     sleep 2
 }
-# =====================================================================
 
 realip(){
     ip=$(curl -s4m8 ip.sb -k) || ip=$(curl -s6m8 ip.sb -k)
@@ -175,9 +169,10 @@ inst_cert(){
             [[ -z $domain ]] && red "未输入域名，无法执行操作！" && exit 1
             green "已输入的域名：$domain"
             
-            domainIP=$(curl -sm8 ipget.net/?ip="${domain}")
-            if [[ $domainIP != $ip ]]; then
-                yellow "警告: 当前域名解析的 IP ($domainIP) 与当前 VPS 的真实 IP ($ip) 不匹配！"
+            domainIP=$(python3 -c "import socket; print(socket.gethostbyname('${domain}'))" 2>/dev/null)
+            
+            if [[ "$domainIP" != "$ip" ]]; then
+                yellow "警告: 当前域名解析的 IP ($domainIP) 与当前 VPS 的真实 IP ($ip) 不匹配或无法解析！"
                 yellow "虽然 DNS 验证可以成功申请证书，但 Hysteria 2 节点必须使用真实 IP 直连。"
                 yellow "请确保你的 Cloudflare 已关闭小云朵 (DNS Only)，否则客户端无法连接。"
                 read -p "是否确认并继续申请证书？(y/n) [默认: y]: " force_cert
@@ -192,7 +187,7 @@ inst_cert(){
             yellow "请在 Cloudflare 控制台 -> 我的个人资料 -> API 令牌 中获取"
             green "=========================================================="
             read -p "请输入 Cloudflare 账号邮箱 (CF_Email): " cf_email
-            read -p "请输入 Cloudflare Global API Key (注意: 必须是 Global API Key, 不能用 API 令牌): " cf_key
+            read -p "请输入 Cloudflare Global API Key: " cf_key
             
             if [[ -z $cf_email || -z $cf_key ]]; then
                 red "邮箱或 API Key 不能为空，无法继续申请证书！"
@@ -203,7 +198,6 @@ inst_cert(){
             export CF_Key="$cf_key"
             
             curl https://get.acme.sh | sh -s email=$cf_email
-            source ~/.bashrc
             bash ~/.acme.sh/acme.sh --upgrade --auto-upgrade
             bash ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
             
@@ -223,7 +217,7 @@ inst_cert(){
                 green "证书申请成功！已保存至 /root/ 目录下。"
                 hy_domain=$domain
             else
-                red "证书申请失败！请检查你的 Cloudflare 邮箱和 Global API Key 是否正确，或者查看终端报错信息。"
+                red "证书申请失败！请检查你的 Cloudflare 邮箱和 API Key 是否正确，或者查看终端报错信息。"
                 exit 1
             fi
         fi
@@ -285,13 +279,13 @@ inst_jump(){
 
 inst_sub_port(){
     read -p "设置 HTTP 订阅服务端口 [1-65535]（回车则随机分配）：" sub_port_input
-    [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 30000-50000 -n 1)
+    [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 10000-30000 -n 1)
     
     until [[ -z $(ss -tunlp | grep -w tcp | awk '{print $5}' | sed 's/.*://g' | grep -w "$sub_port_input") ]]; do
         if [[ -n $(ss -tunlp | grep -w tcp | awk '{print $5}' | sed 's/.*://g' | grep -w "$sub_port_input") ]]; then
             echo -e "${RED} $sub_port_input ${PLAIN} 端口已经被占用，请更换端口重试！"
             read -p "设置 HTTP 订阅服务端口 [1-65535]（回车则随机分配）：" sub_port_input
-            [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 30000-50000 -n 1)
+            [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 10000-30000 -n 1)
         fi
     done
     yellow "HTTP 订阅服务将使用的端口是：$sub_port_input"
@@ -299,13 +293,18 @@ inst_sub_port(){
 
 inst_pwd(){
     read -p "设置 Hysteria 2 密码（回车随机）：" auth_pwd
-    [[ -z $auth_pwd ]] && auth_pwd=$(date +%s%N | md5sum | cut -c 1-8)
+    [[ -z $auth_pwd ]] && auth_pwd=$(cat /proc/sys/kernel/random/uuid 2>/dev/null | cut -c 1-8 || date +%s%N | md5sum | cut -c 1-8)
     yellow "密码为：$auth_pwd"
 }
 
 inst_site(){
-    read -rp "请输入伪装网站地址 （去除https://） [默认en.snu.ac.kr]：" proxysite
-    [[ -z $proxysite ]] && proxysite="en.snu.ac.kr"
+    read -rp "请输入伪装网站地址 （去除https://） [默认www.bing.com]：" proxysite
+    [[ -z $proxysite ]] && proxysite="www.bing.com"
+}
+
+inst_node_name(){
+    read -rp "请输入你的节点名称 (⚠️ 请勿包含空格或特殊字符) [默认: Hysteria2_Node]：" custom_node_name
+    [[ -z $custom_node_name ]] && custom_node_name="Hysteria2_Node"
 }
 
 # ================= 客户端配置与 HTTP 守护进程 =================
@@ -313,10 +312,10 @@ generate_client_configs() {
     realip
     
     local s_pwd=$(grep 'password:' /etc/hysteria/config.yaml | awk '{print $2}')
-    local c_domain=$(grep 'sni:' /root/hy/hy-client.yaml | awk '{print $2}')
+    local c_domain=$(grep 'sni:' /etc/hysteria/hy-client.yaml | awk '{print $2}')
     [[ -z "$c_domain" ]] && c_domain="www.bing.com"
     
-    local c_server=$(grep '^server:' /root/hy/hy-client.yaml | awk '{print $2}')
+    local c_server=$(grep '^server:' /etc/hysteria/hy-client.yaml | awk '{print $2}')
     local c_ports="${c_server##*:}"
     local primary_port=$(echo "$c_ports" | cut -d',' -f1)
     local hop_ports=$(echo "$c_ports" | awk -F ',' '{print $2}')
@@ -332,20 +331,22 @@ generate_client_configs() {
         mport_param="&mport=$hop_ports"
     fi
 
-    mkdir -p /root/hy/www
-    echo "<h1 style='text-align:center;margin-top:20%;'>403 Forbidden</h1>" > /root/hy/www/index.html
+    local web_dir="/var/www/hysteria"
+    mkdir -p $web_dir
+    echo "<h1 style='text-align:center;margin-top:20%;'>403 Forbidden</h1>" > $web_dir/index.html
 
     local sub_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s%N | md5sum | head -c 16)
-    mkdir -p /root/hy/www/$sub_uuid
-    echo "<h1 style='text-align:center;margin-top:20%;'>403 Forbidden</h1>" > /root/hy/www/$sub_uuid/index.html
-    echo "$sub_uuid" > /root/hy/sub_path.txt
+    mkdir -p $web_dir/$sub_uuid
+    echo "<h1 style='text-align:center;margin-top:20%;'>403 Forbidden</h1>" > $web_dir/$sub_uuid/index.html
+    echo "$sub_uuid" > /etc/hysteria/sub_path.txt
 
-    # 节点名称修改为：尼日利亚原生家宽
-    local url="hysteria2://$s_pwd@$uri_ip:$primary_port/?insecure=1&sni=$c_domain${mport_param}#尼日利亚原生家宽"
-    echo "$url" > /root/hy/www/$sub_uuid/url.txt
-    echo -n "$url" | base64 -w 0 > /root/hy/www/$sub_uuid/sub_b64.txt
+    local url="hysteria2://$s_pwd@$uri_ip:$primary_port/?insecure=1&sni=$c_domain${mport_param}#${custom_node_name}"
+    echo "$url" > $web_dir/$sub_uuid/url.txt
+    
+    # 使用安全的 base64 编码方式，兼容极简 Linux 环境
+    echo -n "$url" | base64 | tr -d '\r\n' > $web_dir/$sub_uuid/sub_b64.txt
 
-    cat << EOF > /root/hy/www/$sub_uuid/clash-meta-sub.yaml
+    cat << EOF > $web_dir/$sub_uuid/clash-meta-sub.yaml
 port: 7890
 socks-port: 7891
 allow-lan: true
@@ -354,7 +355,7 @@ log-level: info
 ipv6: true
 
 proxies:
-  - name: "尼日利亚原生家宽"
+  - name: '${custom_node_name}'
     type: hysteria2
     server: "$yaml_json_ip"
     port: $primary_port
@@ -369,7 +370,7 @@ proxy-groups:
   - name: "🚀 节点选择"
     type: select
     proxies:
-      - "尼日利亚原生家宽"
+      - '${custom_node_name}'
       - DIRECT
 
 rules:
@@ -379,7 +380,9 @@ rules:
 EOF
 
     local sub_port=$sub_port_input
-    echo "$sub_port" > /root/hy/sub_port.txt
+    echo "$sub_port" > /etc/hysteria/sub_port.txt
+    
+    chown -R nobody $web_dir 2>/dev/null || true
     
     iptables -I INPUT -p tcp --dport $sub_port -j ACCEPT >/dev/null 2>&1
     save_iptables
@@ -392,10 +395,9 @@ description="Hysteria HTTP Subscription Server"
 command="${py_path}"
 command_args="-m http.server ${sub_port}"
 command_background=true
-directory="/root/hy/www"
+command_user="nobody"
+directory="${web_dir}"
 pidfile="/run/hysteria-sub.pid"
-output_log="/root/hy/http.log"
-error_log="/root/hy/http.log"
 EOF
         chmod +x /etc/init.d/hysteria-sub
         rc-update add hysteria-sub default >/dev/null 2>&1
@@ -407,8 +409,8 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=/root/hy/www
+User=nobody
+WorkingDirectory=${web_dir}
 ExecStart=${py_path} -m http.server ${sub_port}
 Restart=always
 RestartSec=3
@@ -423,13 +425,14 @@ EOF
     svc_stop hysteria-sub >/dev/null 2>&1 || true
     svc_start hysteria-sub
     
-    green "HTTP 订阅服务已通过系统守护进程启动，并已开启防遍历保护..."
+    green "HTTP 订阅服务已通过系统守护进程启动 (以非特权用户运行)，并已开启防遍历保护..."
 }
 
 showconf(){
     local ip=$(curl -s4m8 ip.sb -k) || ip=$(curl -s6m8 ip.sb -k)
-    local sub_port=$(cat /root/hy/sub_port.txt 2>/dev/null)
-    local sub_path=$(cat /root/hy/sub_path.txt 2>/dev/null)
+    local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null)
+    local sub_path=$(cat /etc/hysteria/sub_path.txt 2>/dev/null)
+    local web_dir="/var/www/hysteria"
     
     yellow "================ Hysteria 2 全平台订阅链接 ================"
     green "🎯 1. Clash Meta 专属配置订阅链接 (推荐 Clash Verge 一键导入):"
@@ -439,13 +442,12 @@ showconf(){
     red "http://$ip:$sub_port/$sub_path/sub_b64.txt"
     echo ""
     green "📄 3. 原始 Hysteria 2 协议链接单节点:"
-    red "$(cat /root/hy/www/$sub_path/url.txt 2>/dev/null)"
+    red "$(cat $web_dir/$sub_path/url.txt 2>/dev/null)"
     echo ""
     yellow "==========================================================="
     yellow "提示: 您的订阅链接已被随机 UUID 及防遍历策略双重保护，安全可靠。"
 }
 
-# ================= 流量统计功能 =================
 check_traffic() {
     if [[ ! -f /etc/hysteria/config.yaml ]]; then
         red "未检测到 Hysteria 2 配置文件，请先安装！"
@@ -498,10 +500,8 @@ EOF
     read -p "按回车键返回主菜单..."
     menu
 }
-# =============================================================
 
 insthysteria(){
-    # 调用系统环境体检
     check_env
 
     mkdir -p /etc/hysteria
@@ -515,7 +515,7 @@ insthysteria(){
         *) red "不支持的架构: $arch" && exit 1 ;;
     esac
     
-    hy_ver=$(curl -sL "https://api.github.com/repos/apernet/hysteria/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    hy_ver=$(curl -sI "https://github.com/apernet/hysteria/releases/latest" | grep -i "^location:" | sed 's/.*\/tag\///g' | tr -d '\r\n')
     [[ -z $hy_ver ]] && hy_ver="app/v2.4.0"
     
     wget -N -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/download/${hy_ver}/hysteria-linux-${hy_arch}"
@@ -560,6 +560,7 @@ EOF
     inst_sub_port
     inst_pwd
     inst_site
+    inst_node_name
 
     cat << EOF > /etc/hysteria/config.yaml
 listen: :$port
@@ -600,8 +601,7 @@ EOF
         last_ip=$ip
     fi
 
-    mkdir -p /root/hy
-    cat << EOF > /root/hy/hy-client.yaml
+    cat << EOF > /etc/hysteria/hy-client.yaml
 server: $last_ip:$last_port
 auth: $auth_pwd
 tls:
@@ -625,6 +625,18 @@ EOF
 }
 
 unsthysteria(){
+    local main_port=$(grep '^listen:' /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ')
+    local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null)
+
+    if [[ -n $main_port ]]; then
+        iptables -D INPUT -p udp --dport $main_port -j ACCEPT >/dev/null 2>&1
+        ip6tables -D INPUT -p udp --dport $main_port -j ACCEPT >/dev/null 2>&1
+        yellow "提示：如果你使用了端口跳跃，建议手动使用 iptables -t nat -F PREROUTING 清理 NAT 规则。"
+    fi
+    if [[ -n $sub_port ]]; then
+        iptables -D INPUT -p tcp --dport $sub_port -j ACCEPT >/dev/null 2>&1
+    fi
+
     svc_stop hysteria-server >/dev/null 2>&1 || true
     svc_disable hysteria-server >/dev/null 2>&1 || true
     svc_stop hysteria-sub >/dev/null 2>&1 || true
@@ -635,12 +647,12 @@ unsthysteria(){
     else
         rm -f /etc/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-sub.service
         systemctl daemon-reload >/dev/null 2>&1 || true
-        save_iptables
     fi
-    rm -rf /usr/local/bin/hysteria /etc/hysteria /root/hy /root/hysteria.sh
+    save_iptables
 
-    green "Hysteria 2 服务及相关文件已彻底卸载完成！"
-    yellow "如果你开启了端口跳跃，端口转发规则将保留在系统中，以免误删您的 Docker 规则。您可以重启服务器或手动使用 iptables -t nat -D 清理。"
+    rm -rf /usr/local/bin/hysteria /etc/hysteria /var/www/hysteria /root/hysteria.sh
+
+    green "Hysteria 2 服务及相关文件、端口规则已彻底卸载清理完成！"
 }
 
 starthysteria(){
@@ -667,14 +679,6 @@ hysteriaswitch(){
         3 ) stophysteria && starthysteria ;;
         * ) exit 1 ;;
     esac
-}
-
-changeconf(){
-    green "由于配置修改涉及端口和密码，为了确保数据一致性，建议直接卸载重装体验最佳。"
-    yellow "如果你确定要手动修改配置，请编辑 /etc/hysteria/config.yaml 然后重启服务。"
-    echo ""
-    read -p "按回车键返回主菜单..."
-    menu
 }
 
 enable_bbr(){
