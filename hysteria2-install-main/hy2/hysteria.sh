@@ -74,7 +74,7 @@ save_iptables() {
 }
 # =====================================================================
 
-# ================= 新增：可视化的系统与前置环境体检 =================
+# ================= 系统环境与前置检查 =================
 check_env() {
     clear
     yellow "================= 🖥️  系统环境检查 ================="
@@ -340,7 +340,8 @@ generate_client_configs() {
     echo "<h1 style='text-align:center;margin-top:20%;'>403 Forbidden</h1>" > /root/hy/www/$sub_uuid/index.html
     echo "$sub_uuid" > /root/hy/sub_path.txt
 
-    local url="hysteria2://$s_pwd@$uri_ip:$primary_port/?insecure=1&sni=$c_domain${mport_param}#Hysteria2-Node"
+    # 节点名称修改为：尼日利亚原生家宽
+    local url="hysteria2://$s_pwd@$uri_ip:$primary_port/?insecure=1&sni=$c_domain${mport_param}#尼日利亚原生家宽"
     echo "$url" > /root/hy/www/$sub_uuid/url.txt
     echo -n "$url" | base64 -w 0 > /root/hy/www/$sub_uuid/sub_b64.txt
 
@@ -353,7 +354,7 @@ log-level: info
 ipv6: true
 
 proxies:
-  - name: "Hysteria2-Node"
+  - name: "尼日利亚原生家宽"
     type: hysteria2
     server: "$yaml_json_ip"
     port: $primary_port
@@ -368,7 +369,7 @@ proxy-groups:
   - name: "🚀 节点选择"
     type: select
     proxies:
-      - "Hysteria2-Node"
+      - "尼日利亚原生家宽"
       - DIRECT
 
 rules:
@@ -500,7 +501,7 @@ EOF
 # =============================================================
 
 insthysteria(){
-    # 调用新增的系统环境体检
+    # 调用系统环境体检
     check_env
 
     mkdir -p /etc/hysteria
