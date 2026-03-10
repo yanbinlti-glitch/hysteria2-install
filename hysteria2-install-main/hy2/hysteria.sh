@@ -166,7 +166,6 @@ inst_cert(){
 }
 
 inst_port(){
-    iptables -t nat -F PREROUTING
     read -p "设置 Hysteria 2 节点端口 [1-65535]（回车随机）：" port
     [[ -z $port ]] && port=$(shuf -i 2000-65535 -n 1)
     until [[ -z $(ss -tunlp | grep -w udp | awk '{print $5}' | sed 's/.*://g' | grep -w "$port") ]]; do
@@ -177,6 +176,11 @@ inst_port(){
         fi
     done
     yellow "将在 Hysteria 2 节点使用的端口是：$port"
+    
+    # 【修复漏洞2】：自动开放 Hysteria 2 的 UDP 主端口，解决被内部防火墙拦截的问题
+    iptables -I INPUT -p udp --dport $port -j ACCEPT >/dev/null 2>&1
+    ip6tables -I INPUT -p udp --dport $port -j ACCEPT >/dev/null 2>&1
+
     inst_jump
 }
 
@@ -188,8 +192,10 @@ inst_jump(){
     if [[ $jumpInput == 2 ]]; then
         read -p "起始端口 (建议10000-65535)：" firstport
         read -p "末尾端口 (一定要比起始大)：" endport
+        # 添加 DNAT 转发规则
         iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport  -j DNAT --to-destination :$port
         ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport  -j DNAT --to-destination :$port
+        
         if [[ $SYSTEM == "Alpine" ]]; then
             rc-service iptables save >/dev/null 2>&1 || true
             rc-service ip6tables save >/dev/null 2>&1 || true
@@ -248,15 +254,12 @@ generate_client_configs() {
         mport_param="&mport=$hop_ports"
     fi
 
-    # 漏洞修复：创建专门的 Web 根目录，防止源文件目录被访问
+    # 创建沙盒根目录
     mkdir -p /root/hy/www
-    # 植入空白伪装主页，彻底屏蔽 Python 的目录遍历浏览功能
     echo "<h1 style='text-align:center;margin-top:20%;'>403 Forbidden</h1>" > /root/hy/www/index.html
 
-    # 生成安全的随机 UUID 目录
     local sub_uuid=$(cat /proc/sys/kernel/random/uuid)
     mkdir -p /root/hy/www/$sub_uuid
-    # 同样为 UUID 内部目录屏蔽列表
     echo "<h1 style='text-align:center;margin-top:20%;'>403 Forbidden</h1>" > /root/hy/www/$sub_uuid/index.html
     echo "$sub_uuid" > /root/hy/sub_path.txt
 
@@ -304,7 +307,7 @@ EOF
     local sub_port=$sub_port_input
     echo "$sub_port" > /root/hy/sub_port.txt
     
-    # 开放订阅端口并确保规则被保存（解决重启丢失）
+    # 放行 HTTP 端口
     iptables -I INPUT -p tcp --dport $sub_port -j ACCEPT >/dev/null 2>&1
     if [[ $SYSTEM == "Alpine" ]]; then
         rc-service iptables save >/dev/null 2>&1 || true
@@ -312,7 +315,6 @@ EOF
         netfilter-persistent save >/dev/null 2>&1 || true
     fi
     
-    # 将 HTTP 服务器注册为系统守护进程 (指定安全的 WorkingDirectory)
     local py_path=$(command -v python3)
     if [[ $SYSTEM == "Alpine" ]]; then
         cat << EOF > /etc/init.d/hysteria-sub
@@ -352,7 +354,7 @@ EOF
     svc_stop hysteria-sub >/dev/null 2>&1 || true
     svc_start hysteria-sub
     
-    green "HTTP 订阅服务已通过系统守护进程启动，并已开启防遍历与沙盒保护..."
+    green "HTTP 订阅服务已通过系统守护进程启动，并已开启防遍历保护..."
 }
 
 showconf(){
@@ -435,27 +437,36 @@ insthysteria(){
     fi
     
     if [[ $SYSTEM == "Alpine" ]]; then
-        ${PACKAGE_INSTALL} curl wget sudo qrencode procps iptables ip6tables iproute2
+        ${PACKAGE_INSTALL} curl wget sudo procps iptables ip6tables iproute2
     else
-        ${PACKAGE_INSTALL} curl wget sudo qrencode procps iptables-persistent netfilter-persistent
+        ${PACKAGE_INSTALL} curl wget sudo procps iptables-persistent netfilter-persistent
     fi
 
     mkdir -p /etc/hysteria
+    
+    # 【修复漏洞1】：全部系统统一从官方 Github 仓库拉取二进制文件，彻底移除第三方不受控的安全隐患脚本
+    green "正在从 Apernet 官方仓库下载 Hysteria 2 二进制核心..."
+    arch=$(uname -m)
+    case $arch in
+        x86_64) hy_arch="amd64" ;;
+        aarch64) hy_arch="arm64" ;;
+        s390x) hy_arch="s390x" ;;
+        *) red "不支持的架构: $arch" && exit 1 ;;
+    esac
+    
+    # 动态获取最新版本号
+    hy_ver=$(curl -sL "https://api.github.com/repos/apernet/hysteria/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    [[ -z $hy_ver ]] && hy_ver="app/v2.4.0"
+    
+    wget -N -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/download/${hy_ver}/hysteria-linux-${hy_arch}"
+    if [[ $? -ne 0 ]]; then
+        red "Hysteria 2 核心下载失败，请检查你的 VPS 网络能否访问 Github！"
+        exit 1
+    fi
+    chmod +x /usr/local/bin/hysteria
+    
+    # 自动为主流系统编写原生 Systemd / OpenRC 守护配置
     if [[ $SYSTEM == "Alpine" ]]; then
-        green "正在为 Alpine 下载 Hysteria 2 二进制核心..."
-        arch=$(uname -m)
-        case $arch in
-            x86_64) hy_arch="amd64" ;;
-            aarch64) hy_arch="arm64" ;;
-            s390x) hy_arch="s390x" ;;
-            *) red "不支持的架构" && exit 1 ;;
-        esac
-        
-        hy_ver=$(curl -s https://api.github.com/repos/apernet/hysteria/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-        [[ -z $hy_ver ]] && hy_ver="app/v2.4.0"
-        wget -N -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/download/${hy_ver}/hysteria-linux-${hy_arch}"
-        chmod +x /usr/local/bin/hysteria
-        
         cat << 'EOF' > /etc/init.d/hysteria-server
 #!/sbin/openrc-run
 description="Hysteria 2 Server"
@@ -466,9 +477,23 @@ pidfile="/run/hysteria-server.pid"
 EOF
         chmod +x /etc/init.d/hysteria-server
     else
-        wget -N https://raw.githubusercontent.com/Misaka-blog/hysteria-install/main/hy2/install_server.sh
-        bash install_server.sh
-        rm -f install_server.sh
+        cat << EOF > /etc/systemd/system/hysteria-server.service
+[Unit]
+Description=Hysteria 2 Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/hysteria
+ExecStart=/usr/local/bin/hysteria server -c /etc/hysteria/config.yaml
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload >/dev/null 2>&1
     fi
 
     inst_cert
@@ -530,8 +555,7 @@ quic:
   maxConnReceiveWindow: 33554432
 EOF
 
-    [[ $SYSTEM != "Alpine" ]] && systemctl daemon-reload >/dev/null 2>&1
-    svc_enable hysteria-server
+    svc_enable hysteria-server >/dev/null 2>&1
     svc_start hysteria-server
     
     generate_client_configs
@@ -555,9 +579,10 @@ unsthysteria(){
         netfilter-persistent save >/dev/null 2>&1 || true
     fi
     rm -rf /usr/local/bin/hysteria /etc/hysteria /root/hy /root/hysteria.sh
-    iptables -t nat -F PREROUTING
 
-    green "Hysteria 2 已彻底卸载完成！"
+    # 【修复漏洞3】：移除了毁灭性的 iptables -t nat -F PREROUTING，防止让服务器里的 Docker 和建站应用全军覆没
+    green "Hysteria 2 服务及相关文件已彻底卸载完成！"
+    yellow "如果你开启了端口跳跃，端口转发规则将保留在系统中，以免误删您的 Docker 规则。您可以重启服务器或手动使用 iptables -t nat -D 清理。"
 }
 
 starthysteria(){
