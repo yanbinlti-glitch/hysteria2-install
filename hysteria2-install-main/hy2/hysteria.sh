@@ -138,8 +138,15 @@ inst_cert(){
 
 inst_port(){
     iptables -t nat -F PREROUTING >/dev/null 2>&1
-    read -p "设置 Hysteria 2 端口 [1-65535]（回车随机）：" port
+    read -p "设置 Hysteria 2 节点端口 [1-65535]（回车随机）：" port
     [[ -z $port ]] && port=$(shuf -i 2000-65535 -n 1)
+    until [[ -z $(ss -tunlp | grep -w udp | awk '{print $5}' | sed 's/.*://g' | grep -w "$port") ]]; do
+        if [[ -n $(ss -tunlp | grep -w udp | awk '{print $5}' | sed 's/.*://g' | grep -w "$port") ]]; then
+            echo -e "${RED} $port ${PLAIN} 端口已经被占用，请更换端口重试！"
+            read -p "设置 Hysteria 2 节点端口 [1-65535]（回车随机）：" port
+            [[ -z $port ]] && port=$(shuf -i 2000-65535 -n 1)
+        fi
+    done
     yellow "将在 Hysteria 2 节点使用的端口是：$port"
     inst_jump
 }
@@ -161,6 +168,20 @@ inst_jump(){
             netfilter-persistent save >/dev/null 2>&1
         fi
     fi
+}
+
+inst_sub_port(){
+    read -p "设置 HTTP 订阅服务端口 [1-65535]（回车则随机分配）：" sub_port_input
+    [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 30000-50000 -n 1)
+    
+    until [[ -z $(ss -tunlp | grep -w tcp | awk '{print $5}' | sed 's/.*://g' | grep -w "$sub_port_input") ]]; do
+        if [[ -n $(ss -tunlp | grep -w tcp | awk '{print $5}' | sed 's/.*://g' | grep -w "$sub_port_input") ]]; then
+            echo -e "${RED} $sub_port_input ${PLAIN} 端口已经被占用，请更换端口重试！"
+            read -p "设置 HTTP 订阅服务端口 [1-65535]（回车则随机分配）：" sub_port_input
+            [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 30000-50000 -n 1)
+        fi
+    done
+    yellow "HTTP 订阅服务将使用的端口是：$sub_port_input"
 }
 
 inst_pwd(){
@@ -248,7 +269,8 @@ EOF
         pkill -f "python3 -m http.server $old_port" >/dev/null 2>&1
     fi
 
-    local sub_port=$(shuf -i 30000-50000 -n 1)
+    # 使用用户刚才输入的全局端口变量
+    local sub_port=$sub_port_input
     echo "$sub_port" > /root/hy/sub_port.txt
     
     # 允许 HTTP 端口通过防火墙 (如果开启了iptables)
@@ -325,6 +347,7 @@ EOF
 
     inst_cert
     inst_port
+    inst_sub_port # <----- 这里加入了提示配置 HTTP 端口的步骤
     inst_pwd
     inst_site
 
