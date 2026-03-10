@@ -60,7 +60,6 @@ svc_disable() {
     if [[ $SYSTEM == "Alpine" ]]; then rc-update del "$1" default >/dev/null 2>&1; else systemctl disable "$1" >/dev/null 2>&1; fi
 }
 
-# 修复 BUG 2: 统筹处理各系统防火墙持久化问题
 save_iptables() {
     if [[ $SYSTEM == "Alpine" ]]; then
         rc-service iptables save >/dev/null 2>&1 || true
@@ -151,7 +150,6 @@ inst_cert(){
                 sed -i '/--cron/d' /etc/crontab
                 echo "0 0 * * * root bash /root/.acme.sh/acme.sh --cron -f >/dev/null 2>&1" >> /etc/crontab
                 
-                # 修复 BUG 3: 强制赋予 Acme 生成私钥最严苛的安全权限
                 chmod 644 /root/cert.crt
                 chmod 600 /root/private.key
                 
@@ -195,11 +193,9 @@ inst_port(){
     done
     yellow "将在 Hysteria 2 节点使用的端口是：$port"
     
-    # 放行 UDP 主端口
     iptables -I INPUT -p udp --dport $port -j ACCEPT >/dev/null 2>&1
     ip6tables -I INPUT -p udp --dport $port -j ACCEPT >/dev/null 2>&1
     
-    # 修复 BUG 1: 不管是否使用端口跳跃，这里必须强制保存防火墙规则，防重启失效
     save_iptables
 
     inst_jump
@@ -213,11 +209,9 @@ inst_jump(){
     if [[ $jumpInput == 2 ]]; then
         read -p "起始端口 (建议10000-65535)：" firstport
         read -p "末尾端口 (一定要比起始大)：" endport
-        # 添加 DNAT 转发规则
         iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport  -j DNAT --to-destination :$port
         ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport  -j DNAT --to-destination :$port
         
-        # 保存跳跃规则
         save_iptables
     fi
 }
@@ -271,11 +265,11 @@ generate_client_configs() {
         mport_param="&mport=$hop_ports"
     fi
 
-    # 创建沙盒根目录
     mkdir -p /root/hy/www
     echo "<h1 style='text-align:center;margin-top:20%;'>403 Forbidden</h1>" > /root/hy/www/index.html
 
-    local sub_uuid=$(cat /proc/sys/kernel/random/uuid)
+    # 修复 3: 增加后备方案，防止在极个别精简内核的容器上找不到 UUID 生成器
+    local sub_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s%N | md5sum | head -c 16)
     mkdir -p /root/hy/www/$sub_uuid
     echo "<h1 style='text-align:center;margin-top:20%;'>403 Forbidden</h1>" > /root/hy/www/$sub_uuid/index.html
     echo "$sub_uuid" > /root/hy/sub_path.txt
@@ -324,7 +318,6 @@ EOF
     local sub_port=$sub_port_input
     echo "$sub_port" > /root/hy/sub_port.txt
     
-    # 放行 HTTP 端口并保存规则
     iptables -I INPUT -p tcp --dport $sub_port -j ACCEPT >/dev/null 2>&1
     save_iptables
     
@@ -446,16 +439,16 @@ EOF
 
 insthysteria(){
     if [[ ! ${SYSTEM} == "CentOS" ]]; then
-        ${PACKAGE_UPDATE}
+        ${PACKAGE_UPDATE[int]}
     fi
     
-    # 修复 BUG 2: 彻底解决 CentOS 下防火墙依赖缺失的问题
+    # 修复 1: 修正了 Bash 中提取数组时漏写下标 [int] 的问题
     if [[ $SYSTEM == "Alpine" ]]; then
-        ${PACKAGE_INSTALL} curl wget sudo procps iptables ip6tables iproute2
+        ${PACKAGE_INSTALL[int]} curl wget sudo procps iptables ip6tables iproute2
     elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" ]]; then
-        ${PACKAGE_INSTALL} curl wget sudo procps iptables iptables-services iproute
+        ${PACKAGE_INSTALL[int]} curl wget sudo procps iptables iptables-services iproute
     else
-        ${PACKAGE_INSTALL} curl wget sudo procps iptables-persistent netfilter-persistent iproute2
+        ${PACKAGE_INSTALL[int]} curl wget sudo procps iptables-persistent netfilter-persistent iproute2
     fi
 
     mkdir -p /etc/hysteria
@@ -584,10 +577,11 @@ unsthysteria(){
     svc_stop hysteria-sub >/dev/null 2>&1 || true
     svc_disable hysteria-sub >/dev/null 2>&1 || true
 
+    # 修复 2: 修正清理卸载时 Systemd 配置文件的绝对路径残留问题
     if [[ $SYSTEM == "Alpine" ]]; then
         rm -f /etc/init.d/hysteria-server /etc/init.d/hysteria-sub
     else
-        rm -f /lib/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-sub.service
+        rm -f /etc/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-sub.service
         systemctl daemon-reload >/dev/null 2>&1 || true
         save_iptables
     fi
