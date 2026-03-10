@@ -144,7 +144,8 @@ check_env() {
 }
 
 realip(){
-    ip=$(curl -s4m8 ip.sb -k) || ip=$(curl -s6m8 ip.sb -k)
+    # 增加备用 IP 获取通道，防止单一 API 挂掉导致脚本卡死
+    ip=$(curl -s4m8 ip.sb -k || curl -s4m8 ifconfig.me -k) || ip=$(curl -s6m8 ip.sb -k || curl -s6m8 ifconfig.me -k)
 }
 
 inst_cert(){
@@ -278,14 +279,24 @@ inst_jump(){
 }
 
 inst_sub_port(){
-    read -p "设置 HTTP 订阅服务端口 [1-65535]（回车则随机分配）：" sub_port_input
+    read -p "设置 HTTP 订阅服务端口 [1024-65535]（回车则随机分配）：" sub_port_input
     [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 10000-30000 -n 1)
+    
+    # 强制防线：拦截小于 1024 的特权端口，防止 nobody 用户权限报错崩溃
+    if [[ "$sub_port_input" -lt 1024 ]]; then
+        red "⚠️ 警告：订阅服务为了安全已降级为 nobody 运行，Linux 严禁非 root 用户绑定 1024 以下特权端口！"
+        yellow "系统已自动为您切换为安全的随机高位端口。"
+        sub_port_input=$(shuf -i 10000-30000 -n 1)
+    fi
     
     until [[ -z $(ss -tunlp | grep -w tcp | awk '{print $5}' | sed 's/.*://g' | grep -w "$sub_port_input") ]]; do
         if [[ -n $(ss -tunlp | grep -w tcp | awk '{print $5}' | sed 's/.*://g' | grep -w "$sub_port_input") ]]; then
             echo -e "${RED} $sub_port_input ${PLAIN} 端口已经被占用，请更换端口重试！"
-            read -p "设置 HTTP 订阅服务端口 [1-65535]（回车则随机分配）：" sub_port_input
+            read -p "设置 HTTP 订阅服务端口 [1024-65535]（回车则随机分配）：" sub_port_input
             [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 10000-30000 -n 1)
+            if [[ "$sub_port_input" -lt 1024 ]]; then
+                sub_port_input=$(shuf -i 10000-30000 -n 1)
+            fi
         fi
     done
     yellow "HTTP 订阅服务将使用的端口是：$sub_port_input"
@@ -429,7 +440,7 @@ EOF
 }
 
 showconf(){
-    local ip=$(curl -s4m8 ip.sb -k) || ip=$(curl -s6m8 ip.sb -k)
+    local ip=$(curl -s4m8 ip.sb -k || curl -s4m8 ifconfig.me -k) || ip=$(curl -s6m8 ip.sb -k || curl -s6m8 ifconfig.me -k)
     local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null)
     local sub_path=$(cat /etc/hysteria/sub_path.txt 2>/dev/null)
     local web_dir="/var/www/hysteria"
