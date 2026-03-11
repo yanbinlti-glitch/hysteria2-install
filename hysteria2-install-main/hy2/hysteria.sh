@@ -41,34 +41,35 @@ done
 
 if [[ -z $(type -P curl) ]]; then
     if [[ ! $SYSTEM == "CentOS" ]]; then
-        ${PACKAGE_UPDATE[int]} >/dev/null 2>&1
+        ${PACKAGE_UPDATE[int]}
     fi
-    ${PACKAGE_INSTALL[int]} curl >/dev/null 2>&1
+    ${PACKAGE_INSTALL[int]} curl
 fi
 
 # ================= 兼容 OpenRC 和 Systemd 的服务控制 =================
+# 移除了 >/dev/null 2>&1 以暴露报错日志
 svc_start() {
-    if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" start >/dev/null 2>&1; else systemctl start "$1" >/dev/null 2>&1; fi
+    if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" start; else systemctl start "$1"; fi
 }
 svc_stop() {
-    if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" stop >/dev/null 2>&1; else systemctl stop "$1" >/dev/null 2>&1; fi
+    if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" stop || true; else systemctl stop "$1" || true; fi
 }
 svc_enable() {
-    if [[ $SYSTEM == "Alpine" ]]; then rc-update add "$1" default >/dev/null 2>&1; else systemctl enable "$1" >/dev/null 2>&1; fi
+    if [[ $SYSTEM == "Alpine" ]]; then rc-update add "$1" default; else systemctl enable "$1"; fi
 }
 svc_disable() {
-    if [[ $SYSTEM == "Alpine" ]]; then rc-update del "$1" default >/dev/null 2>&1; else systemctl disable "$1" >/dev/null 2>&1; fi
+    if [[ $SYSTEM == "Alpine" ]]; then rc-update del "$1" default || true; else systemctl disable "$1" || true; fi
 }
 
 save_iptables() {
     if [[ $SYSTEM == "Alpine" ]]; then
-        rc-service iptables save >/dev/null 2>&1 || true
-        rc-service ip6tables save >/dev/null 2>&1 || true
+        rc-service iptables save || true
+        rc-service ip6tables save || true
     elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" ]]; then
-        service iptables save >/dev/null 2>&1 || true
-        service ip6tables save >/dev/null 2>&1 || true
+        service iptables save || true
+        service ip6tables save || true
     else
-        netfilter-persistent save >/dev/null 2>&1 || true
+        netfilter-persistent save || true
     fi
 }
 
@@ -114,22 +115,22 @@ check_env() {
         yellow " ⏳ 发现缺失前置组件，正在为您自动拉取安装，请稍候..."
         
         if [[ ! $SYSTEM == "CentOS" ]]; then
-            ${PACKAGE_UPDATE[int]} >/dev/null 2>&1
+            ${PACKAGE_UPDATE[int]}
         fi
         
         if [[ $SYSTEM == "Alpine" ]]; then
-            ${PACKAGE_INSTALL[int]} curl wget sudo procps iptables ip6tables iproute2 python3 openssl socat cronie >/dev/null 2>&1
-            svc_start crond >/dev/null 2>&1
-            svc_enable crond >/dev/null 2>&1
+            ${PACKAGE_INSTALL[int]} curl wget sudo procps iptables ip6tables iproute2 python3 openssl socat cronie
+            svc_start crond
+            svc_enable crond
         elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" ]]; then
-            ${PACKAGE_INSTALL[int]} curl wget sudo procps iptables iptables-services iproute python3 openssl socat cronie >/dev/null 2>&1
-            svc_start crond >/dev/null 2>&1
-            svc_enable crond >/dev/null 2>&1
+            ${PACKAGE_INSTALL[int]} curl wget sudo procps iptables iptables-services iproute python3 openssl socat cronie
+            svc_start crond
+            svc_enable crond
         else
             export DEBIAN_FRONTEND=noninteractive
-            ${PACKAGE_INSTALL[int]} curl wget sudo procps iptables-persistent netfilter-persistent iproute2 python3 openssl socat cron >/dev/null 2>&1
-            svc_start cron >/dev/null 2>&1
-            svc_enable cron >/dev/null 2>&1
+            ${PACKAGE_INSTALL[int]} curl wget sudo procps iptables-persistent netfilter-persistent iproute2 python3 openssl socat cron
+            svc_start cron
+            svc_enable cron
         fi
         
         green " ✨ 所有前置依赖补全完成！"
@@ -144,7 +145,6 @@ check_env() {
 }
 
 realip(){
-    # 增加备用 IP 获取通道，防止单一 API 挂掉导致脚本卡死
     ip=$(curl -s4m8 ip.sb -k || curl -s4m8 ifconfig.me -k) || ip=$(curl -s6m8 ip.sb -k || curl -s6m8 ifconfig.me -k)
 }
 
@@ -255,8 +255,8 @@ inst_port(){
     done
     yellow "将在 Hysteria 2 节点使用的端口是：$port"
     
-    iptables -I INPUT -p udp --dport $port -j ACCEPT >/dev/null 2>&1
-    ip6tables -I INPUT -p udp --dport $port -j ACCEPT >/dev/null 2>&1
+    iptables -I INPUT -p udp --dport $port -j ACCEPT
+    ip6tables -I INPUT -p udp --dport $port -j ACCEPT
     
     save_iptables
 
@@ -393,9 +393,9 @@ EOF
     local sub_port=$sub_port_input
     echo "$sub_port" > /etc/hysteria/sub_port.txt
     
-    chown -R nobody $web_dir 2>/dev/null || true
+    chown -R nobody $web_dir || true
     
-    iptables -I INPUT -p tcp --dport $sub_port -j ACCEPT >/dev/null 2>&1
+    iptables -I INPUT -p tcp --dport $sub_port -j ACCEPT
     save_iptables
     
     local py_path=$(command -v python3)
@@ -411,7 +411,7 @@ directory="${web_dir}"
 pidfile="/run/hysteria-sub.pid"
 EOF
         chmod +x /etc/init.d/hysteria-sub
-        rc-update add hysteria-sub default >/dev/null 2>&1
+        rc-update add hysteria-sub default
     else
         cat << EOF > /etc/systemd/system/hysteria-sub.service
 [Unit]
@@ -429,11 +429,11 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload >/dev/null 2>&1
-        systemctl enable hysteria-sub >/dev/null 2>&1
+        systemctl daemon-reload
+        systemctl enable hysteria-sub
     fi
     
-    svc_stop hysteria-sub >/dev/null 2>&1 || true
+    svc_stop hysteria-sub || true
     svc_start hysteria-sub
     
     green "HTTP 订阅服务已通过系统守护进程启动 (以非特权用户运行)，并已开启防遍历保护..."
@@ -457,8 +457,46 @@ showconf(){
     echo ""
     yellow "==========================================================="
     yellow "提示: 您的订阅链接已被随机 UUID 及防遍历策略双重保护，安全可靠。"
+    echo ""
+    read -p "按回车键返回主菜单..."
+    menu
 }
 
+# ================= 新增：查看与编辑配置 =================
+edit_config() {
+    clear
+    if [[ ! -f /etc/hysteria/config.yaml ]]; then
+        red "未检测到 Hysteria 2 配置文件，请先安装！"
+        sleep 2
+        menu
+        return
+    fi
+    
+    green "================ ⚙️ 当前 Hysteria 2 节点配置 ================"
+    cat /etc/hysteria/config.yaml
+    green "================================================================"
+    echo ""
+    read -p "是否需要修改配置文件？(y/n) [默认: n]: " edit_choice
+    if [[ "$edit_choice" == "y" || "$edit_choice" == "Y" ]]; then
+        if command -v nano >/dev/null; then
+            nano /etc/hysteria/config.yaml
+        elif command -v vi >/dev/null; then
+            vi /etc/hysteria/config.yaml
+        else
+            red "未找到 nano 或 vi 编辑器，请手动修改 /etc/hysteria/config.yaml"
+        fi
+        
+        green "配置修改完成，正在重启 Hysteria 2 服务以使配置生效..."
+        svc_stop hysteria-server
+        svc_start hysteria-server
+        green "重启成功！新的配置已生效。"
+    fi
+    echo ""
+    read -p "按回车键返回主菜单..."
+    menu
+}
+
+# ================= 增强：客户端连接与流量统计 =================
 check_traffic() {
     if [[ ! -f /etc/hysteria/config.yaml ]]; then
         red "未检测到 Hysteria 2 配置文件，请先安装！"
@@ -485,12 +523,18 @@ EOF
         red "获取数据失败。请检查 Hysteria 2 服务是否运行正常 ( systemctl status hysteria-server )。"
     elif [[ ! "$traffic_data" =~ '"tx"' ]]; then
         echo ""
-        green "================ 🚀 Hysteria 2 流量统计 =================="
-        yellow "当前节点没有任何流量消耗记录。"
+        green "================ 🚀 客户端连接与流量统计 =================="
+        yellow "当前节点没有任何流量消耗记录或客户端连接。"
         green "========================================================"
     else
         echo ""
-        green "================ 🚀 Hysteria 2 流量统计 =================="
+        green "================ 🚀 客户端连接与流量统计 =================="
+        
+        # 统计有流量记录的唯一客户端数量
+        local client_count=$(echo "$traffic_data" | grep -o '"[^"]*":{[^}]*}' | grep -c '"tx"')
+        yellow "活跃客户端 (产生流量记录) 总数: $client_count"
+        echo "--------------------------------------------------------"
+        
         echo "$traffic_data" | grep -o '"[^"]*":{[^}]*}' | grep '"tx"' | while read -r line; do
             user=$(echo "$line" | cut -d '"' -f2)
             tx=$(echo "$line" | grep -o '"tx":[0-9]*' | cut -d: -f2)
@@ -502,7 +546,7 @@ EOF
             tx_mb=$(awk "BEGIN {printf \"%.2f\", $tx/1048576}")
             rx_mb=$(awk "BEGIN {printf \"%.2f\", $rx/1048576}")
             
-            echo -e "  ➡️  客户端密码: ${GREEN}${user}${PLAIN} \t| ⬆️ 发送: ${YELLOW}${tx_mb} MB${PLAIN} \t| ⬇️ 接收: ${YELLOW}${rx_mb} MB${PLAIN}"
+            echo -e "  👥 客户端账号: ${GREEN}${user}${PLAIN} \t| ⬆️ 节点发送: ${YELLOW}${tx_mb} MB${PLAIN} \t| ⬇️ 节点接收: ${YELLOW}${rx_mb} MB${PLAIN}"
         done
         green "========================================================"
     fi
@@ -563,7 +607,7 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload >/dev/null 2>&1
+        systemctl daemon-reload
     fi
 
     inst_cert
@@ -625,14 +669,20 @@ quic:
   maxConnReceiveWindow: 33554432
 EOF
 
-    svc_enable hysteria-server >/dev/null 2>&1
+    svc_enable hysteria-server
     svc_start hysteria-server
     
     generate_client_configs
     
     red "======================================================================"
     green "Hysteria 2 代理及 HTTP 订阅服务安装完成"
-    showconf
+    # 这里直接在安装完后执行展示订阅，不阻塞，避免用户错过
+    # 原版这里调用了 showconf，但在 showconf 最后加入了返回主菜单，稍作修改让其直接回到主菜单
+    # 或者直接提示去菜单4查看。
+    echo ""
+    green "请在主菜单选择 [4] 查看您的订阅链接。"
+    sleep 3
+    menu
 }
 
 unsthysteria(){
@@ -640,39 +690,42 @@ unsthysteria(){
     local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null)
 
     if [[ -n $main_port ]]; then
-        iptables -D INPUT -p udp --dport $main_port -j ACCEPT >/dev/null 2>&1
-        ip6tables -D INPUT -p udp --dport $main_port -j ACCEPT >/dev/null 2>&1
+        iptables -D INPUT -p udp --dport $main_port -j ACCEPT || true
+        ip6tables -D INPUT -p udp --dport $main_port -j ACCEPT || true
         yellow "提示：如果你使用了端口跳跃，建议手动使用 iptables -t nat -F PREROUTING 清理 NAT 规则。"
     fi
     if [[ -n $sub_port ]]; then
-        iptables -D INPUT -p tcp --dport $sub_port -j ACCEPT >/dev/null 2>&1
+        iptables -D INPUT -p tcp --dport $sub_port -j ACCEPT || true
     fi
 
-    svc_stop hysteria-server >/dev/null 2>&1 || true
-    svc_disable hysteria-server >/dev/null 2>&1 || true
-    svc_stop hysteria-sub >/dev/null 2>&1 || true
-    svc_disable hysteria-sub >/dev/null 2>&1 || true
+    svc_stop hysteria-server || true
+    svc_disable hysteria-server || true
+    svc_stop hysteria-sub || true
+    svc_disable hysteria-sub || true
 
     if [[ $SYSTEM == "Alpine" ]]; then
         rm -f /etc/init.d/hysteria-server /etc/init.d/hysteria-sub
     else
         rm -f /etc/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-sub.service
-        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl daemon-reload || true
     fi
     save_iptables
 
     rm -rf /usr/local/bin/hysteria /etc/hysteria /var/www/hysteria /root/hysteria.sh
 
     green "Hysteria 2 服务及相关文件、端口规则已彻底卸载清理完成！"
+    sleep 2
+    exit 0
 }
 
 starthysteria(){
     svc_start hysteria-server
     svc_start hysteria-sub
     green "Hysteria 2 及订阅服务已安全启动！"
+    sleep 2; menu
 }
 
-stophysteria(){
+stophysteria_only(){
     svc_stop hysteria-server
     svc_stop hysteria-sub
     green "Hysteria 2 及订阅服务已关闭！"
@@ -686,14 +739,14 @@ hysteriaswitch(){
     read -rp "请输入选项 [1-3]: " switchInput
     case $switchInput in
         1 ) starthysteria ;;
-        2 ) stophysteria ;;
-        3 ) stophysteria && starthysteria ;;
+        2 ) stophysteria_only; sleep 2; menu ;;
+        3 ) stophysteria_only && starthysteria ;;
         * ) exit 1 ;;
     esac
 }
 
 enable_bbr(){
-    modprobe tcp_bbr >/dev/null 2>&1 || true
+    modprobe tcp_bbr || true
     if [[ $(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep bbr) ]]; then
         green "检测到 BBR 加速已经开启，无需重复配置！"
         sleep 2; menu; return
@@ -703,7 +756,7 @@ enable_bbr(){
     sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
     echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
     echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-    sysctl -p >/dev/null 2>&1
+    sysctl -p
     
     green "BBR 加速开启成功！"
     read -p "按回车键返回主菜单..."
@@ -722,11 +775,12 @@ menu() {
     echo -e " 3. 关闭、开启、重启服务"
     echo -e " 4. 显示 Hysteria 2 订阅链接"
     echo -e " ${YELLOW}5. 开启 BBR 网络加速 (推荐)${PLAIN}"
-    echo -e " ${GREEN}6. 查看当前用户流量消耗状态${PLAIN}"
+    echo -e " ${GREEN}6. 查看客户端连接及流量统计${PLAIN}"
+    echo -e " ${YELLOW}7. 查看并修改 Hysteria 2 配置${PLAIN}"
     echo " ------------------------------------------------------------"
     echo -e " 0. 退出脚本"
     echo ""
-    read -rp "请输入选项 [0-6]: " menuInput
+    read -rp "请输入选项 [0-7]: " menuInput
     case $menuInput in
         1 ) insthysteria ;;
         2 ) unsthysteria ;;
@@ -734,6 +788,7 @@ menu() {
         4 ) showconf ;;
         5 ) enable_bbr ;;
         6 ) check_traffic ;;
+        7 ) edit_config ;;
         0 ) exit 0 ;;
         * ) exit 1 ;;
     esac
