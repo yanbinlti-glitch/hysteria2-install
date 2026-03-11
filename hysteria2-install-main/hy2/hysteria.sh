@@ -47,7 +47,6 @@ if [[ -z $(type -P curl) ]]; then
 fi
 
 # ================= 兼容 OpenRC 和 Systemd 的服务控制 =================
-# 移除了 >/dev/null 2>&1 以暴露报错日志
 svc_start() {
     if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" start; else systemctl start "$1"; fi
 }
@@ -282,7 +281,6 @@ inst_sub_port(){
     read -p "设置 HTTP 订阅服务端口 [1024-65535]（回车则随机分配）：" sub_port_input
     [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 10000-30000 -n 1)
     
-    # 强制防线：拦截小于 1024 的特权端口，防止 nobody 用户权限报错崩溃
     if [[ "$sub_port_input" -lt 1024 ]]; then
         red "⚠️ 警告：订阅服务为了安全已降级为 nobody 运行，Linux 严禁非 root 用户绑定 1024 以下特权端口！"
         yellow "系统已自动为您切换为安全的随机高位端口。"
@@ -318,11 +316,36 @@ inst_node_name(){
     [[ -z $custom_node_name ]] && custom_node_name="Hysteria2_Node"
 }
 
+inst_bandwidth(){
+    echo ""
+    green "================ 🚀 节点带宽控制配置 (降低延迟关键) ================"
+    yellow "Hysteria 2 推荐配置服务端最大可用带宽，以配合 Brutal 拥塞控制算法防止缓冲膨胀。"
+    read -p "请输入 VPS 的最大上行带宽 (如 500 mbps, 1 gbps，回车默认 1 gbps)：" bw_up
+    [[ -z $bw_up ]] && bw_up="1 gbps"
+    read -p "请输入 VPS 的最大下行带宽 (如 500 mbps, 1 gbps，回车默认 1 gbps)：" bw_down
+    [[ -z $bw_down ]] && bw_down="1 gbps"
+}
+
+inst_obfs(){
+    echo ""
+    green "================ 🛡️ 防阻断混淆(Obfuscation)配置 ================"
+    yellow "开启 Salamander 混淆可有效防止运营商针对未知大流量 UDP 的 QoS 限速和封锁。"
+    read -p "是否开启 Salamander 混淆？(y/n) [默认: y]: " enable_obfs
+    [[ -z $enable_obfs ]] && enable_obfs="y"
+    if [[ "$enable_obfs" == "y" || "$enable_obfs" == "Y" ]]; then
+        obfs_pwd=$(cat /proc/sys/kernel/random/uuid 2>/dev/null | cut -c 1-12 || date +%s%N | md5sum | cut -c 1-12)
+        yellow "已开启混淆，自动生成的混淆密码为：$obfs_pwd"
+    else
+        obfs_pwd=""
+        yellow "已选择不开启混淆。"
+    fi
+}
+
 # ================= 客户端配置与 HTTP 守护进程 =================
 generate_client_configs() {
     realip
     
-    local s_pwd=$(grep 'password:' /etc/hysteria/config.yaml | awk '{print $2}')
+    local s_pwd=$(grep 'password:' /etc/hysteria/config.yaml | head -n 1 | awk '{print $2}')
     local c_domain=$(grep 'sni:' /etc/hysteria/hy-client.yaml | awk '{print $2}')
     [[ -z "$c_domain" ]] && c_domain="www.bing.com"
     
@@ -331,6 +354,16 @@ generate_client_configs() {
     local primary_port=$(echo "$c_ports" | cut -d',' -f1)
     local hop_ports=$(echo "$c_ports" | awk -F ',' '{print $2}')
     
+    # 提取服务端混淆密码
+    local s_obfs_pwd=$(awk '/obfs:/{flag=1} flag && /password:/{print $2; flag=0}' /etc/hysteria/config.yaml | tr -d '"' | tr -d "'")
+    local obfs_param=""
+    local clash_obfs_block=""
+    if [[ -n "$s_obfs_pwd" ]]; then
+        obfs_param="&obfs=salamander&obfs-password=${s_obfs_pwd}"
+        clash_obfs_block="    obfs: salamander
+    obfs-password: \"$s_obfs_pwd\""
+    fi
+
     local yaml_json_ip="$ip"
     local uri_ip="$ip"
     if [[ -n $(echo "$ip" | grep ":") ]]; then
@@ -351,12 +384,13 @@ generate_client_configs() {
     echo "<h1 style='text-align:center;margin-top:20%;'>403 Forbidden</h1>" > $web_dir/$sub_uuid/index.html
     echo "$sub_uuid" > /etc/hysteria/sub_path.txt
 
-    local url="hysteria2://$s_pwd@$uri_ip:$primary_port/?insecure=1&sni=$c_domain${mport_param}#${custom_node_name}"
+    # 包含混淆参数的 URL 链接
+    local url="hysteria2://$s_pwd@$uri_ip:$primary_port/?insecure=1&sni=$c_domain${mport_param}${obfs_param}#${custom_node_name}"
     echo "$url" > $web_dir/$sub_uuid/url.txt
     
-    # 使用安全的 base64 编码方式，兼容极简 Linux 环境
     echo -n "$url" | base64 | tr -d '\r\n' > $web_dir/$sub_uuid/sub_b64.txt
 
+    # Clash Meta 订阅文件生成
     cat << EOF > $web_dir/$sub_uuid/clash-meta-sub.yaml
 port: 7890
 socks-port: 7891
@@ -376,6 +410,9 @@ $([[ -n "$hop_ports" ]] && echo "    ports: '$hop_ports'")
     skip-cert-verify: true
     alpn:
       - h3
+$clash_obfs_block
+    up: '50 mbps'
+    down: '500 mbps'
 
 proxy-groups:
   - name: "🚀 节点选择"
@@ -456,13 +493,13 @@ showconf(){
     red "$(cat $web_dir/$sub_path/url.txt 2>/dev/null)"
     echo ""
     yellow "==========================================================="
-    yellow "提示: 您的订阅链接已被随机 UUID 及防遍历策略双重保护，安全可靠。"
+    yellow "提示 1: 您的订阅链接已被随机 UUID 及防遍历策略双重保护，安全可靠。"
+    yellow "提示 2: 导入 Clash 后，请根据您本地的实际宽带，修改 up/down 数值获得最佳体验。"
     echo ""
     read -p "按回车键返回主菜单..."
     menu
 }
 
-# ================= 新增：查看与编辑配置 =================
 edit_config() {
     clear
     if [[ ! -f /etc/hysteria/config.yaml ]]; then
@@ -496,7 +533,6 @@ edit_config() {
     menu
 }
 
-# ================= 增强：客户端连接与流量统计 =================
 check_traffic() {
     if [[ ! -f /etc/hysteria/config.yaml ]]; then
         red "未检测到 Hysteria 2 配置文件，请先安装！"
@@ -530,7 +566,6 @@ EOF
         echo ""
         green "================ 🚀 客户端连接与流量统计 =================="
         
-        # 统计有流量记录的唯一客户端数量
         local client_count=$(echo "$traffic_data" | grep -o '"[^"]*":{[^}]*}' | grep -c '"tx"')
         yellow "活跃客户端 (产生流量记录) 总数: $client_count"
         echo "--------------------------------------------------------"
@@ -616,7 +651,10 @@ EOF
     inst_pwd
     inst_site
     inst_node_name
+    inst_bandwidth
+    inst_obfs
 
+    # 写入优化版服务端配置 (移除 quic 窗口硬编码，加入混淆与带宽控制)
     cat << EOF > /etc/hysteria/config.yaml
 listen: :$port
 
@@ -624,15 +662,20 @@ tls:
   cert: $cert_path
   key: $key_path
 
-quic:
-  initStreamReceiveWindow: 16777216
-  maxStreamReceiveWindow: 16777216
-  initConnReceiveWindow: 33554432
-  maxConnReceiveWindow: 33554432
-
 auth:
   type: password
   password: $auth_pwd
+
+bandwidth:
+  up: $bw_up
+  down: $bw_down
+
+$(if [[ -n "$obfs_pwd" ]]; then
+echo "obfs:
+  type: salamander
+  salamander:
+    password: \"$obfs_pwd\""
+fi)
 
 masquerade:
   type: proxy
@@ -662,11 +705,6 @@ auth: $auth_pwd
 tls:
   sni: $hy_domain
   insecure: true
-quic:
-  initStreamReceiveWindow: 16777216
-  maxStreamReceiveWindow: 16777216
-  initConnReceiveWindow: 33554432
-  maxConnReceiveWindow: 33554432
 EOF
 
     svc_enable hysteria-server
@@ -676,9 +714,6 @@ EOF
     
     red "======================================================================"
     green "Hysteria 2 代理及 HTTP 订阅服务安装完成"
-    # 这里直接在安装完后执行展示订阅，不阻塞，避免用户错过
-    # 原版这里调用了 showconf，但在 showconf 最后加入了返回主菜单，稍作修改让其直接回到主菜单
-    # 或者直接提示去菜单4查看。
     echo ""
     green "请在主菜单选择 [4] 查看您的订阅链接。"
     sleep 3
@@ -731,34 +766,30 @@ stophysteria_only(){
     green "Hysteria 2 及订阅服务已关闭！"
 }
 
-hysteriaswitch(){
-    yellow "请选择操作："
-    echo -e " ${GREEN}1.${PLAIN} 启动 Hysteria 2"
-    echo -e " ${GREEN}2.${PLAIN} 关闭 Hysteria 2"
-    echo -e " ${GREEN}3.${PLAIN} 重启 Hysteria 2"
-    read -rp "请输入选项 [1-3]: " switchInput
-    case $switchInput in
-        1 ) starthysteria ;;
-        2 ) stophysteria_only; sleep 2; menu ;;
-        3 ) stophysteria_only && starthysteria ;;
-        * ) exit 1 ;;
-    esac
-}
-
 enable_bbr(){
     modprobe tcp_bbr || true
-    if [[ $(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep bbr) ]]; then
-        green "检测到 BBR 加速已经开启，无需重复配置！"
-        sleep 2; menu; return
-    fi
     
+    # 清理旧的参数并写入全新的网络和 UDP 优化参数
     sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
     sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
+    sed -i '/net.core.rmem_max/d' /etc/sysctl.conf
+    sed -i '/net.core.rmem_default/d' /etc/sysctl.conf
+    sed -i '/net.core.wmem_max/d' /etc/sysctl.conf
+    sed -i '/net.core.wmem_default/d' /etc/sysctl.conf
+    sed -i '/net.ipv4.udp_mem/d' /etc/sysctl.conf
+
     echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
     echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    # 扩大 UDP 缓冲区至 ~25MB
+    echo "net.core.rmem_max=26214400" >> /etc/sysctl.conf
+    echo "net.core.rmem_default=26214400" >> /etc/sysctl.conf
+    echo "net.core.wmem_max=26214400" >> /etc/sysctl.conf
+    echo "net.core.wmem_default=26214400" >> /etc/sysctl.conf
+    echo "net.ipv4.udp_mem=262144 524288 1048576" >> /etc/sysctl.conf
+    
     sysctl -p
     
-    green "BBR 加速开启成功！"
+    green "BBR 及 UDP 缓冲区底层优化开启成功！这能显著降低 Hysteria 2 的丢包率。"
     read -p "按回车键返回主菜单..."
     menu
 }
@@ -766,7 +797,7 @@ enable_bbr(){
 menu() {
     clear
     echo "#############################################################"
-    echo -e "#     ${GREEN}Hysteria 2 一键安装脚本 (带自建 HTTP 订阅服务)${PLAIN}      #"
+    echo -e "#     ${GREEN}Hysteria 2 一键安装脚本 (极致优化版)${PLAIN}              #"
     echo "#############################################################"
     echo ""
     echo -e " ${GREEN}1.${PLAIN} ${GREEN}安装 Hysteria 2${PLAIN}"
@@ -774,7 +805,7 @@ menu() {
     echo " ------------------------------------------------------------"
     echo -e " 3. 关闭、开启、重启服务"
     echo -e " 4. 显示 Hysteria 2 订阅链接"
-    echo -e " ${YELLOW}5. 开启 BBR 网络加速 (推荐)${PLAIN}"
+    echo -e " ${YELLOW}5. 开启 BBR 及 UDP 缓冲区网络加速 (推荐)${PLAIN}"
     echo -e " ${GREEN}6. 查看客户端连接及流量统计${PLAIN}"
     echo -e " ${YELLOW}7. 查看并修改 Hysteria 2 配置${PLAIN}"
     echo " ------------------------------------------------------------"
