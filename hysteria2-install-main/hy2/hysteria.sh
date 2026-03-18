@@ -274,7 +274,9 @@ inst_cert() {
                 read cf_token
                 [[ -z $cf_token ]] && red " Token 不能为空！" && exit 1
                 export CF_Token="$cf_token"
-                curl https://get.acme.sh | sh -s email="admin@${domain}" || { echo ""; red " [错误] Acme.sh 脚本下载失败！"; exit 1; }
+                if [[ ! -f "/root/.acme.sh/acme.sh" ]]; then
+                    curl https://get.acme.sh | sh -s email="admin@${domain}" || { echo ""; red " [错误] Acme.sh 脚本下载失败！"; exit 1; }
+                fi
             else
                 echo -en " ${LIGHT_YELLOW} ▶ 请输入 Cloudflare 账号邮箱: ${PLAIN}"
                 read cf_email
@@ -283,7 +285,9 @@ inst_cert() {
                 [[ -z $cf_email || -z $cf_key ]] && red " 邮箱或 Key 不能为空！" && exit 1
                 export CF_Email="$cf_email"
                 export CF_Key="$cf_key"
-                curl https://get.acme.sh | sh -s email="$cf_email" || { echo ""; red " [错误] Acme.sh 脚本下载失败！"; exit 1; }
+                if [[ ! -f "/root/.acme.sh/acme.sh" ]]; then
+                    curl https://get.acme.sh | sh -s email="$cf_email" || { echo ""; red " [错误] Acme.sh 脚本下载失败！"; exit 1; }
+                fi
             fi
             
             bash /root/.acme.sh/acme.sh --upgrade --auto-upgrade
@@ -360,7 +364,7 @@ inst_port() {
         [[ -z $port ]] && port=$(shuf -i 10000-65535 -n 1)
     done
 
-    while ss -unl | grep -q ":$port\b"; do
+    while ss -unl | grep -E -q ":$port( |$)"; do
         red " [警告] 端口 $port 已被占用！"
         echo -en " ${LIGHT_YELLOW} ▶ 重新设置主端口: ${PLAIN}"
         read port
@@ -423,7 +427,7 @@ inst_sub_port(){
         [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 10000-30000 -n 1)
     done
     
-    while ss -tnl | grep -q ":$sub_port_input\b"; do
+    while ss -tnl | grep -E -q ":$sub_port_input( |$)"; do
         red " [警告] 端口 $sub_port_input 已被占用！"
         echo -en " ${LIGHT_YELLOW} ▶ 重新设置订阅端口: ${PLAIN}"
         read sub_port_input
@@ -541,6 +545,9 @@ clean_env() {
             firewall-cmd --zone=public --remove-port=$f_port-$e_port/udp --permanent 2>/dev/null
             firewall-cmd --reload 2>/dev/null
         fi
+    else
+        echo ""
+        yellow "  [提示] 未找到端口跳跃记录文件。如果您之前开启了端口跳跃，请手动检查并清理 UFW / Firewalld 中的 UDP 端口范围。"
     fi
 
     svc_stop hysteria-server 2>/dev/null; svc_disable hysteria-server 2>/dev/null
@@ -558,10 +565,8 @@ clean_env() {
     
     if [[ "$mode" == "all" ]]; then
         rm -f /root/cert.crt /root/private.key /root/ca.log
-        if [[ -d /root/.acme.sh ]]; then
-            /root/.acme.sh/acme.sh --uninstall
-            rm -rf /root/.acme.sh
-        fi
+        echo ""
+        yellow "  [提示] 为防止影响您的其他业务，Acme.sh 环境已被保留，未执行全局卸载。"
     fi
 }
 
@@ -790,7 +795,7 @@ insthysteria() {
     mkdir -p /etc/hysteria
     
     api_port=$(shuf -i 30000-60000 -n 1)
-    while ss -tnl | grep -q ":$api_port\b"; do api_port=$(shuf -i 30000-60000 -n 1); done
+    while ss -tnl | grep -E -q ":$api_port( |$)"; do api_port=$(shuf -i 30000-60000 -n 1); done
     echo "$api_port" > /etc/hysteria/api_port.txt
     
     echo ""
@@ -954,7 +959,7 @@ unsthysteria() {
     rm -f /usr/local/bin/hy2
 
     echo ""
-    green "  Hysteria 2 服务及相关文件、端口规则、证书已被彻底清理！"
+    green "  Hysteria 2 服务及相关文件、端口规则已被彻底清理！"
     sleep 2
     exit 0
 }
@@ -1108,7 +1113,7 @@ check_traffic() {
     
     if ! grep -q "^trafficStats:" /etc/hysteria/config.yaml; then
         local api_port=$(shuf -i 30000-60000 -n 1)
-        while ss -tnl | grep -q ":$api_port\b"; do api_port=$(shuf -i 30000-60000 -n 1); done
+        while ss -tnl | grep -E -q ":$api_port( |$)"; do api_port=$(shuf -i 30000-60000 -n 1); done
         echo "$api_port" > /etc/hysteria/api_port.txt
         
         green "  正在自动开启流量统计 API..."
@@ -1160,8 +1165,10 @@ try:
             tx_mb = stats.get('tx', 0) / 1048576
             rx_mb = stats.get('rx', 0) / 1048576
             print(f'\033[33m  账号: {user} | 发送: {tx_mb:.2f} MB | 接收: {rx_mb:.2f} MB\033[0m')
+except ValueError:
+    print('\033[31m  [错误] Hysteria 流量 API 返回了非 JSON 数据，服务可能处于异常状态。\033[0m')
 except Exception as e:
-    print('\033[31m  JSON 解析失败，获取流量数据异常！\033[0m')
+    print('\033[31m  获取流量数据异常: ' + str(e) + '\033[0m')
 "
     fi
     
