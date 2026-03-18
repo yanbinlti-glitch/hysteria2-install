@@ -223,7 +223,7 @@ inst_cert() {
             [[ -z $domain ]] && red " 未输入域名，无法执行操作！" && exit 1
             green " 已记录域名：$domain"
             
-            # [修复] 兼容 IPv4 和 IPv6 解析
+            # 兼容 IPv4 和 IPv6 解析
             domainIP=$(python3 -c "import socket; print(socket.getaddrinfo('${domain}', None)[0][4][0])" 2>/dev/null)
             
             if [[ "$domainIP" != "$ip" ]]; then
@@ -269,7 +269,7 @@ inst_cert() {
             yellow " 正在通过 DNS API 验证所有权，请留意下方执行日志 (约1-3分钟)..."
             bash /root/.acme.sh/acme.sh --issue --dns dns_cf -d ${domain} -k ec-256
             
-            # [修复] 重启命令加入复制证书逻辑，确保 Python 订阅服务端同步更新
+            # 重启命令加入复制证书逻辑，确保 Python 订阅服务端同步更新
             local reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && systemctl restart hysteria-server && systemctl restart hysteria-sub"
             [[ $SYSTEM == "Alpine" ]] && reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && rc-service hysteria-server restart && rc-service hysteria-sub restart"
             
@@ -804,7 +804,7 @@ unsthysteria() {
     [[ -n "$main_port" && "$main_port" =~ ^[0-9]+$ ]] && close_port $main_port "udp"
     [[ -n "$sub_port" && "$sub_port" =~ ^[0-9]+$ ]] && close_port $sub_port "tcp"
 
-    # [修复] 卸载时精准清理跳跃端口规则，防正则误删
+    # 卸载时精准清理跳跃端口规则，防正则误删
     iptables-save -t nat | grep "hy2-port-hop" | sed 's/^-A /-D /' | while read -r rule; do
         iptables -t nat $rule || true
     done
@@ -925,7 +925,7 @@ edit_config() {
     cat /etc/hysteria/config.yaml
     echo ""
     print_line
-    # [修复] 提前警告手动更改端口带来的防火墙风险
+    # 提前警告手动更改端口带来的防火墙风险
     yellow "  [警告] 如果您在此处修改了 listen (主端口) 或通过系统修改了订阅端口，"
     yellow "         脚本将无法自动更新系统的防火墙规则！修改后请务必自行放行新端口。"
     print_line
@@ -970,7 +970,7 @@ EOF
         svc_stop hysteria-server
         svc_start hysteria-server
         sleep 2
-        # [修复] 避免初次激活就拉取空数据导致懵逼
+        # 避免初次激活就拉取空数据导致懵逼
         yellow "  流量统计功能已激活！"
         yellow "  (注意：由于服务刚刚重启，所有历史流量已清空，请稍后重新连接并产生流量后再来查看)"
         echo ""
@@ -1096,6 +1096,79 @@ enable_bbr() {
     read temp
 }
 
+check_cert() {
+    clear
+    echo ""
+    print_line
+    green "                    证书安装状态与详细信息                 "
+    print_line
+    echo ""
+
+    if [[ ! -f /etc/hysteria/config.yaml ]]; then
+        red "  [✘] 未检测到 Hysteria 2 配置文件，请先安装服务！"
+        echo ""
+        echo -en " ${LIGHT_YELLOW} ▶ 按回车键返回主菜单... ${PLAIN}"
+        read temp
+        return
+    fi
+
+    # 从配置文件中提取证书路径
+    local cert_path=$(grep -w 'cert:' /etc/hysteria/config.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
+
+    if [[ -z "$cert_path" || ! -f "$cert_path" ]]; then
+        red "  [✘] 未找到证书文件！证书可能未成功申请，或路径配置有误。"
+        yellow "  当前配置文件中读取到的证书路径为: ${cert_path:-未配置}"
+    else
+        green "  [✔] 证书文件已就绪！"
+        purple "  所在路径: $cert_path"
+        echo ""
+        
+        # 依赖 openssl 解析证书内容
+        if command -v openssl >/dev/null 2>&1; then
+            # 提取证书信息
+            local cert_subject=$(openssl x509 -in "$cert_path" -noout -subject 2>/dev/null | awk -F'CN = |CN=' '{print $2}' | awk -F',' '{print $1}')
+            local cert_issuer=$(openssl x509 -in "$cert_path" -noout -issuer 2>/dev/null | awk -F'CN = |CN=|O = |O=' '{print $2}' | awk -F',' '{print $1}')
+            local cert_start=$(openssl x509 -in "$cert_path" -noout -startdate 2>/dev/null | cut -d= -f2)
+            local cert_end=$(openssl x509 -in "$cert_path" -noout -enddate 2>/dev/null | cut -d= -f2)
+            
+            yellow "  ▶ 绑定的域名 (CN) : ${cert_subject:-未知}"
+            yellow "  ▶ 证书颁发机构    : ${cert_issuer:-未知}"
+            yellow "  ▶ 证书生效日期    : $cert_start"
+            
+            # 尝试计算剩余过期天数
+            local end_epoch=$(date -d "$cert_end" +%s 2>/dev/null)
+            local now_epoch=$(date +%s 2>/dev/null)
+            if [[ -n "$end_epoch" && -n "$now_epoch" && "$end_epoch" =~ ^[0-9]+$ ]]; then
+                local days_left=$(( (end_epoch - now_epoch) / 86400 ))
+                if [[ $days_left -lt 0 ]]; then
+                    red "  ▶ 证书过期日期    : $cert_end (⚠ 已经过期！)"
+                elif [[ $days_left -lt 15 ]]; then
+                    red "  ▶ 证书过期日期    : $cert_end (⚠ 仅剩 $days_left 天，即将过期！)"
+                else
+                    green "  ▶ 证书过期日期    : $cert_end (正常，剩余 $days_left 天)"
+                fi
+            else
+                yellow "  ▶ 证书过期日期    : $cert_end"
+            fi
+            
+            # 判断证书类型给予提示
+            if [[ "$cert_subject" == "www.bing.com" ]]; then
+                echo ""
+                yellow "  ℹ 提示: 当前使用的是系统自动生成的【必应自签伪装证书】。"
+            elif [[ "$cert_issuer" =~ "Let's Encrypt" || "$cert_issuer" =~ "ZeroSSL" || "$cert_issuer" =~ "Google" ]]; then
+                echo ""
+                green "  ℹ 提示: 当前使用的是受信任的【真实域名证书】。"
+            fi
+        else
+            red "  [警告] 系统未安装 openssl 组件，无法读取证书的详细内部信息。"
+        fi
+    fi
+    
+    echo ""
+    echo -en " ${LIGHT_YELLOW} ▶ 按回车键返回主菜单... ${PLAIN}"
+    read temp
+}
+
 # =================================================================
 #  8. 主菜单控制
 # =================================================================
@@ -1123,11 +1196,12 @@ menu() {
     echo -e "  ${LIGHT_GREEN}[5]${PLAIN} ${LIGHT_GREEN}获取 节点配置 与 订阅链接${PLAIN}"
     echo -e "  ${LIGHT_GREEN}[6]${PLAIN} ${LIGHT_YELLOW}查看 客户端连接 与 流量统计${PLAIN}"
     echo -e "  ${LIGHT_GREEN}[7]${PLAIN} ${LIGHT_PURPLE}开启 BBR 及 UDP 缓冲区加速 (推荐)${PLAIN}"
+    echo -e "  ${LIGHT_GREEN}[8]${PLAIN} ${LIGHT_GREEN}检查 证书安装状态与详细信息${PLAIN}"
     echo "----------------------------------------------------------------------------------"
     echo -e "  ${LIGHT_GREEN}[0]${PLAIN} ${LIGHT_RED}退出脚本${PLAIN}"
     red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
     echo ""
-    echo -en " ${LIGHT_YELLOW} ▶ 请输入选项 [0-7]: ${PLAIN}"
+    echo -en " ${LIGHT_YELLOW} ▶ 请输入选项 [0-8]: ${PLAIN}"
     read menuInput
     case $menuInput in
         1 ) insthysteria ;;
@@ -1137,6 +1211,7 @@ menu() {
         5 ) showconf ;;
         6 ) check_traffic ;;
         7 ) enable_bbr ;;
+        8 ) check_cert ;;
         0 ) exit 0 ;;
         * ) red "  输入无效"; sleep 1 ;;
     esac
