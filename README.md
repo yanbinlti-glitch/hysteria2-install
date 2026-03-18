@@ -1,33 +1,46 @@
-# 🚀 Hysteria 2 一键安装与管理脚本 (带防遍历 HTTP 订阅服务)
+# Hysteria 2 一键部署与管理脚本 (单人旗舰加固版)
 
-这是一个功能强大、极致安全的 **Hysteria 2** 代理协议一键安装与管理脚本。不仅包含了基础的核心搭建，还内置了防遍历的 HTTP 订阅分发系统、端口跳跃、自动化证书管理以及实时流量统计。
+![License](https://img.shields.io/badge/License-MIT-blue.svg)
+![Bash](https://img.shields.io/badge/Language-Bash-green.svg)
+![Hysteria2](https://img.shields.io/badge/Core-Hysteria_2-purple.svg)
 
-## ✨ 核心特性 (Features)
+本项目是一个功能全面、极致优化的 Hysteria 2 服务端一键部署与管理脚本。专为追求低延迟、高并发和防封锁的单人/小团体用户打造。包含智能订阅分发、端口跳跃、极限 UDP 调优以及全自动证书健康诊断等旗舰级功能。
 
-* **🛡️ 极致安全的订阅分发**：内置基于 Python3 的 HTTP 订阅服务。采用 `nobody` 降权运行，拒绝 Root 风险；配合随机 UUID 目录防遍历机制，确保您的节点信息不被恶意爬取。
-* **🔗 全平台订阅兼容**：自动生成 **Clash Meta / Verge** 专属 YAML 订阅文件，以及通用 Base64 订阅链接（适用于 v2rayN, Shadowrocket 等）。
-* **🔀 端口跳跃与防封锁**：支持配置单端口或大规模端口跳跃 (Port Hopping)，有效应对 ISP 封锁和 QoS 限制。
-* **🔐 智能证书管理**：
-    * 支持 Bing 自签证书（开箱即用，免配域名）。
-    * 支持通过 ACME.sh 调用 Cloudflare DNS API 自动申请并续期真实 TLS 证书。
-    * 支持自定义已有的证书路径。
-* **📊 实时流量监控**：内置 Hysteria 2 流量统计 API，一键查看当前各个客户端（密码）的上传/下载消耗。
-* **🚀 网络底层优化**：一键开启 BBR 拥塞控制与 FQ 队列，榨干 VPS 最后一滴带宽。
-* **🧹 绿色无残留卸载**：智能清理服务进程、相关文件以及 iptables/ip6tables 端口放行与 NAT 转发规则。
+## ✨ 核心特性
 
-## 💻 支持的操作系统 (Supported OS)
+* **全系统兼容**：深度兼容 Alpine (OpenRC)、Debian, Ubuntu, CentOS, Fedora, Alma, Rocky, Amazon Linux 等主流 Linux 发行版。
+* **三种证书模式**：
+    * 🎯 **必应自签伪装** (默认)：免域名，直接利用 IP 与必应自签证书启动，适合纯小白。
+    * 🛡️ **Acme.sh 自动申请**：对接 Cloudflare DNS API（支持 Token 与 Global Key），全自动申请并续签真实域名证书。
+    * 📁 **自定义证书**：支持手动指定服务器上的现有证书路径。
+* **防阻断黑科技**：
+    * **端口跳跃 (Port Hopping)**：一键配置 iptables/ip6tables 端口跳跃转发，有效防止单端口被运营商 QoS 或封锁。
+    * **Salamander 混淆**：内置开启抗特征审查混淆，保护流量隐私。
+* **极致网络调优**：
+    * **Brutal 拥塞控制**：自定义上下行带宽，跑满宽带。
+    * **BBR 自适应回退**：支持输入 0 开启 BBR 模式，适合弱网或带宽未知环境。
+    * **极限 UDP 并发加速**：一键写入内核级缓冲区调优参数，防止高并发导致 OOM 或丢包。
+* **全平台智能订阅服务器**：
+    * 内置 Python 双栈 (IPv4/IPv6) 智能 Web 订阅分发。
+    * 自适应客户端 User-Agent（自动下发 Clash Meta 格式配置或标准 Base64 节点链接）。
+* **可视化数据与诊断**：
+    * 实时监控当前在线客户端数与出入站流量消耗。
+    * **密码学级证书诊断**：自动检测证书是否过期、RSA/ECC 密钥是否配对，并提供本地缓存一键修复功能。
 
-脚本底层针对各大主流 Linux 发行版的包管理器和服务管理器（Systemd & OpenRC）进行了深度适配：
+## 💻 支持的操作系统
 
-* **Debian** (推荐)
-* **Ubuntu** (推荐)
-* **Alpine Linux** (极简环境完美兼容)
-* **CentOS / AlmaLinux / Rocky Linux / Fedora**
-* **Oracle Linux / Amazon Linux**
+| OS Family | Supported Versions | Init System |
+| :--- | :--- | :--- |
+| **Alpine Linux** | Latest | OpenRC |
+| **Debian** | 10, 11, 12+ | Systemd |
+| **Ubuntu** | 18.04, 20.04, 22.04+ | Systemd |
+| **CentOS/RHEL** | 7, 8, 9 (Alma/Rocky) | Systemd |
+| **Amazon Linux** | 2, 2023 | Systemd |
+| **Fedora** | 36+ | Systemd |
 
-## 🛠️ 安装与使用 (Usage)
+## 🚀 安装与使用
 
-1. 将脚本下载或上传至您的 VPS（以 `root` 用户登录）。
-2. 赋予脚本执行权限：
-   ```bash
-   wget -N --no-check-certificate https://raw.githubusercontent.com/yanbinlti-glitch/hysteria2-install/main/hysteria2-install-main/hy2/hysteria.sh && bash hysteria.sh
+连接到您的 VPS，在 root 权限下执行以下命令下载并运行脚本：
+
+```bash
+wget -N --no-check-certificate https://raw.githubusercontent.com/yanbinlti-glitch/hysteria2-install/main/hysteria2-install-main/hy2/hysteria.sh && bash hysteria.sh
