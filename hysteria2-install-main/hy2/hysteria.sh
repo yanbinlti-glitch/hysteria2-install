@@ -123,20 +123,21 @@ check_env() {
             $PKG_UPDATE
         fi
         
+        # 修复 Alpine 环境下 qrencode 包名错误的问题
         if [[ $SYSTEM == "Alpine" ]]; then
-            $PKG_INSTALL curl wget sudo procps iptables ip6tables iproute2 python3 openssl socat cronie qrencode
-            svc_start crond
-            svc_enable crond
+            $PKG_INSTALL curl wget sudo procps iptables ip6tables iproute2 python3 openssl socat cronie libqrencode-tools
+            svc_start crond || true
+            svc_enable crond || true
         elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" || $SYSTEM == "Alma" || $SYSTEM == "Rocky" ]]; then
             $PKG_INSTALL epel-release || true
             $PKG_INSTALL curl wget sudo procps iptables iptables-services iproute python3 openssl socat cronie qrencode
-            svc_start crond
-            svc_enable crond
+            svc_start crond || true
+            svc_enable crond || true
         else
             export DEBIAN_FRONTEND=noninteractive
             $PKG_INSTALL curl wget sudo procps iptables-persistent netfilter-persistent iproute2 python3 openssl socat cron qrencode
-            svc_start cron
-            svc_enable cron
+            svc_start cron || true
+            svc_enable cron || true
         fi
         
         green " ✨ 所有前置依赖补全完成！"
@@ -660,7 +661,7 @@ showconf(){
             yum install -y qrencode >/dev/null 2>&1
         elif [[ $SYSTEM == "Alpine" ]]; then
             apk update >/dev/null 2>&1
-            apk add qrencode >/dev/null 2>&1
+            apk add libqrencode-tools >/dev/null 2>&1
         fi
     fi
 
