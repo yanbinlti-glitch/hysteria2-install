@@ -53,106 +53,111 @@ done
 
 if [[ -z $(type -P curl) ]]; then
     if [[ ! $SYSTEM == "CentOS" ]]; then
-        $PKG_UPDATE >/dev/null 2>&1
+        $PKG_UPDATE
     fi
-    $PKG_INSTALL curl >/dev/null 2>&1
+    $PKG_INSTALL curl
 fi
 
 # ================= 兼容 OpenRC 和 Systemd 的服务控制 =================
 svc_start() {
-    if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" start >/dev/null 2>&1; else systemctl start "$1" >/dev/null 2>&1; fi
+    if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" start; else systemctl start "$1"; fi
 }
 svc_stop() {
-    if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" stop >/dev/null 2>&1 || true; else systemctl stop "$1" >/dev/null 2>&1 || true; fi
+    if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" stop || true; else systemctl stop "$1" || true; fi
 }
 svc_enable() {
-    if [[ $SYSTEM == "Alpine" ]]; then rc-update add "$1" default >/dev/null 2>&1; else systemctl enable "$1" >/dev/null 2>&1; fi
+    if [[ $SYSTEM == "Alpine" ]]; then rc-update add "$1" default; else systemctl enable "$1"; fi
 }
 svc_disable() {
-    if [[ $SYSTEM == "Alpine" ]]; then rc-update del "$1" default >/dev/null 2>&1 || true; else systemctl disable "$1" >/dev/null 2>&1 || true; fi
+    if [[ $SYSTEM == "Alpine" ]]; then rc-update del "$1" default || true; else systemctl disable "$1" || true; fi
 }
 
 save_iptables() {
     if [[ $SYSTEM == "Alpine" ]]; then
-        rc-service iptables save >/dev/null 2>&1 || true
-        rc-service ip6tables save >/dev/null 2>&1 || true
+        rc-service iptables save || true
+        rc-service ip6tables save || true
     elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" ]]; then
-        service iptables save >/dev/null 2>&1 || true
-        service ip6tables save >/dev/null 2>&1 || true
+        service iptables save || true
+        service ip6tables save || true
     else
-        netfilter-persistent save >/dev/null 2>&1 || true
+        netfilter-persistent save || true
     fi
 }
 
 # ================= 系统环境与前置检查 =================
 check_env() {
     clear
-    green " ┌──────────────────────────────────────────────────────┐"
+    echo ""
+    green " ╭──────────────────────────────────────────────────────╮"
     green " │                 系统依赖与环境检查                   │"
-    green " └──────────────────────────────────────────────────────┘"
-    cyan " ────────────────────────────────────────────────────────"
+    green " ╰──────────────────────────────────────────────────────╯"
+    echo ""
     green " 当前操作系统: $SYSTEM"
     yellow " 正在检查 Hysteria 2 及附加服务所需的前置依赖包..."
-    cyan " ────────────────────────────────────────────────────────"
+    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     
     local cmds=("curl" "wget" "sudo" "ss" "iptables" "python3" "openssl" "socat" "qrencode")
     local missing=0
 
     for cmd in "${cmds[@]}"; do
         if ! command -v "$cmd" &> /dev/null; then
-            red "   [缺失] $cmd"
+            red "   [✘] 缺失: $cmd"
             missing=1
         else
-            green "   [正常] $cmd 已安装"
+            green "   [✔] 正常: $cmd"
         fi
     done
 
     if ! command -v crontab &> /dev/null; then
-        red "   [缺失] crontab (用于证书自动续期)"
+        red "   [✘] 缺失: crontab (用于证书自动续期)"
         missing=1
     else
-        green "   [正常] crontab 已安装"
+        green "   [✔] 正常: crontab"
     fi
 
     if [[ $SYSTEM == "Debian" || $SYSTEM == "Ubuntu" ]]; then
         if ! command -v netfilter-persistent &> /dev/null; then
-            red "   [缺失] netfilter-persistent (用于防火墙规则保存)"
+            red "   [✘] 缺失: netfilter-persistent (用于防火墙规则保存)"
             missing=1
         else
-            green "   [正常] netfilter-persistent 已安装"
+            green "   [✔] 正常: netfilter-persistent"
         fi
     fi
 
     if [[ $missing -eq 1 ]]; then
-        cyan " ────────────────────────────────────────────────────────"
-        yellow " 发现缺失前置组件，正在为您自动拉取安装，请稍候..."
+        echo ""
+        cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+        yellow " 发现缺失前置组件，正在为您自动拉取安装，请查看下方日志..."
+        echo ""
         
         if [[ ! $SYSTEM == "CentOS" ]]; then
-            $PKG_UPDATE >/dev/null 2>&1
+            $PKG_UPDATE
         fi
         
         if [[ $SYSTEM == "Alpine" ]]; then
-            $PKG_INSTALL curl wget sudo procps iptables ip6tables iproute2 python3 openssl socat cronie libqrencode-tools >/dev/null 2>&1
+            $PKG_INSTALL curl wget sudo procps iptables ip6tables iproute2 python3 openssl socat cronie libqrencode-tools
             svc_start crond || true
             svc_enable crond || true
         elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" || $SYSTEM == "Alma" || $SYSTEM == "Rocky" ]]; then
-            $PKG_INSTALL epel-release >/dev/null 2>&1 || true
-            $PKG_INSTALL curl wget sudo procps iptables iptables-services iproute python3 openssl socat cronie qrencode >/dev/null 2>&1
+            $PKG_INSTALL epel-release || true
+            $PKG_INSTALL curl wget sudo procps iptables iptables-services iproute python3 openssl socat cronie qrencode
             svc_start crond || true
             svc_enable crond || true
         else
             export DEBIAN_FRONTEND=noninteractive
-            $PKG_INSTALL curl wget sudo procps iptables-persistent netfilter-persistent iproute2 python3 openssl socat cron qrencode >/dev/null 2>&1
+            $PKG_INSTALL curl wget sudo procps iptables-persistent netfilter-persistent iproute2 python3 openssl socat cron qrencode
             svc_start cron || true
             svc_enable cron || true
         fi
         
+        echo ""
         green " 所有前置依赖补全完成！"
     else
-        cyan " ────────────────────────────────────────────────────────"
+        echo ""
+        cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
         green " 所有前置依赖检查通过，环境非常完美，无需额外安装！"
     fi
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
     sleep 2
 }
 
@@ -165,14 +170,16 @@ realip(){
 
 inst_cert(){
     clear
-    green " ┌──────────────────────────────────────────────────────┐"
+    echo ""
+    green " ╭──────────────────────────────────────────────────────╮"
     green " │                  Hysteria 2 证书配置                 │"
-    green " └──────────────────────────────────────────────────────┘"
-    cyan " ────────────────────────────────────────────────────────"
+    green " ╰──────────────────────────────────────────────────────╯"
+    echo ""
     green "   [1] 必应自签证书 (推荐小白，默认)"
     purple "   [2] Acme 脚本申请 (需 Cloudflare 域名托管)"
     yellow "   [3] 自定义证书路径"
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
+    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     read -rp " 请输入选项 [1-3] (默认1): " certInput
     [[ -z $certInput ]] && certInput=1
     
@@ -182,12 +189,12 @@ inst_cert(){
         chmod a+x /root 
         if [[ -f /root/cert.crt && -f /root/private.key ]] && [[ -s /root/cert.crt && -s /root/private.key ]] && [[ -f /root/ca.log ]]; then
             domain=$(cat /root/ca.log)
-            cyan " ────────────────────────────────────────────────────────"
+            echo ""
             green " 检测到原有域名：$domain 的证书，正在应用..."
             hy_domain=$domain
         else
             realip
-            cyan " ────────────────────────────────────────────────────────"
+            echo ""
             read -p " 请输入需要申请证书的域名：" domain
             [[ -z $domain ]] && red " 未输入域名，无法执行操作！" && exit 1
             green " 已输入的域名：$domain"
@@ -195,7 +202,7 @@ inst_cert(){
             domainIP=$(python3 -c "import socket; print(socket.gethostbyname('${domain}'))" 2>/dev/null)
             
             if [[ "$domainIP" != "$ip" ]]; then
-                cyan " ────────────────────────────────────────────────────────"
+                echo ""
                 yellow " [警告] 域名解析的 IP ($domainIP) 与当前 VPS 真实 IP ($ip) 不匹配！"
                 yellow " [警告] Hysteria 2 必须使用真实 IP 直连，请确保 Cloudflare 已关闭小云朵 (DNS Only)。"
                 read -p " 是否确认并继续申请证书？(y/n) [默认: y]: " force_cert
@@ -205,10 +212,11 @@ inst_cert(){
                 fi
             fi
 
-            cyan " ────────────────────────────────────────────────────────"
+            echo ""
+            cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
             yellow " 准备使用 Cloudflare DNS API 申请证书"
             purple " 推荐在 CF控制台 -> 我的个人资料 -> API 令牌 中获取 Token"
-            cyan " ────────────────────────────────────────────────────────"
+            cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
             read -p " 请选择认证方式 [1. API Token (推荐) | 2. Global API Key]: " cf_auth_choice
             [[ -z $cf_auth_choice ]] && cf_auth_choice=1
 
@@ -235,7 +243,7 @@ inst_cert(){
             bash ~/.acme.sh/acme.sh --upgrade --auto-upgrade
             bash ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
             
-            cyan " ────────────────────────────────────────────────────────"
+            echo ""
             yellow " 正在通过 Cloudflare DNS API 验证所有权 (可能需要1-3分钟)..."
             bash ~/.acme.sh/acme.sh --issue --dns dns_cf -d ${domain} -k ec-256
             
@@ -260,19 +268,20 @@ inst_cert(){
             fi
         fi
     elif [[ $certInput == 3 ]]; then
-        cyan " ────────────────────────────────────────────────────────"
+        echo ""
         read -p " 请输入公钥文件 crt 的绝对路径：" cert_path
         read -p " 请输入密钥文件 key 的绝对路径：" key_path
         read -p " 请输入该证书对应的域名：" domain
         hy_domain=$domain
     else
-        cyan " ────────────────────────────────────────────────────────"
-        green " 已选择 必应(Bing)自签伪装证书"
+        echo ""
+        green " 已选择 必应(Bing)自签伪装证书，开始生成密钥与证书..."
         mkdir -p /etc/hysteria
         cert_path="/etc/hysteria/cert.crt"
         key_path="/etc/hysteria/private.key"
-        openssl ecparam -genkey -name prime256v1 -out /etc/hysteria/private.key >/dev/null 2>&1
-        openssl req -new -x509 -days 36500 -key /etc/hysteria/private.key -out /etc/hysteria/cert.crt -subj "/CN=www.bing.com" >/dev/null 2>&1
+        
+        openssl ecparam -genkey -name prime256v1 -out /etc/hysteria/private.key
+        openssl req -new -x509 -days 36500 -key /etc/hysteria/private.key -out /etc/hysteria/cert.crt -subj "/CN=www.bing.com"
         
         chmod 644 /etc/hysteria/cert.crt
         chmod 600 /etc/hysteria/private.key
@@ -283,7 +292,8 @@ inst_cert(){
 }
 
 inst_port(){
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
+    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     read -p " 设置 Hysteria 2 节点端口 [1-65535] (回车随机)：" port
     [[ -z $port ]] && port=$(shuf -i 2000-65535 -n 1)
     
@@ -301,23 +311,23 @@ inst_port(){
     green " 节点主端口已设置为：$port"
     
     iptables -I INPUT -p udp --dport $port -j ACCEPT
-    ip6tables -I INPUT -p udp --dport $port -j ACCEPT 2>/dev/null || true
-    if command -v ufw >/dev/null 2>&1; then ufw allow $port/udp >/dev/null 2>&1; fi
-    if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --zone=public --add-port=$port/udp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1; fi
+    ip6tables -I INPUT -p udp --dport $port -j ACCEPT || true
+    if command -v ufw >/dev/null 2>&1; then ufw allow $port/udp; fi
+    if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --zone=public --add-port=$port/udp --permanent; firewall-cmd --reload; fi
     save_iptables
 
     inst_jump
 }
 
 inst_jump(){
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
     yellow " 端口模式选择："
     green "   [1] 单端口直连 (默认)"
     purple "   [2] 端口跳跃模式 (防封锁黑科技)"
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
     read -rp " 请输入选项 [1-2] (默认1): " jumpInput
     if [[ $jumpInput == 2 ]]; then
-        cyan " ────────────────────────────────────────────────────────"
+        echo ""
         read -p " 请输入起始端口 (建议10000-65535)：" firstport
         while [[ ! "$firstport" =~ ^[0-9]+$ ]] || [[ "$firstport" -lt 1 ]] || [[ "$firstport" -gt 65535 ]]; do
             red " [警告] 起始端口必须是纯数字！"
@@ -331,18 +341,19 @@ inst_jump(){
         done
         green " 已开启端口跳跃范围：$firstport - $endport"
 
-        modprobe ip6table_nat 2>/dev/null || true
+        modprobe ip6table_nat || true
         iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport  -j DNAT --to-destination :$port
-        ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport  -j DNAT --to-destination :$port 2>/dev/null || true
-        if command -v ufw >/dev/null 2>&1; then ufw allow $firstport:$endport/udp >/dev/null 2>&1; fi
-        if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --zone=public --add-port=$firstport-$endport/udp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1; fi
+        ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport  -j DNAT --to-destination :$port || true
+        if command -v ufw >/dev/null 2>&1; then ufw allow $firstport:$endport/udp; fi
+        if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --zone=public --add-port=$firstport-$endport/udp --permanent; firewall-cmd --reload; fi
         
         save_iptables
     fi
 }
 
 inst_sub_port(){
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
+    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     read -p " 设置智能订阅服务端口 [1024-65535] (回车随机)：" sub_port_input
     [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 10000-30000 -n 1)
     
@@ -361,29 +372,30 @@ inst_sub_port(){
 }
 
 inst_pwd(){
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
     read -p " 设置节点连接密码 (回车自动生成)：" auth_pwd
     [[ -z $auth_pwd ]] && auth_pwd=$(cat /proc/sys/kernel/random/uuid 2>/dev/null | cut -c 1-8 || date +%s%N | md5sum | cut -c 1-8)
     green " 连接密码为：$auth_pwd"
 }
 
 inst_site(){
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
     read -rp " 伪装网站地址 (不带 https://) [回车默认 www.bing.com]：" proxysite
     [[ -z $proxysite ]] && proxysite="www.bing.com"
 }
 
 inst_node_name(){
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
     read -rp " 节点显示名称 (勿含空格特殊字符) [回车默认 Hysteria2_Node]：" custom_node_name
     [[ -z $custom_node_name ]] && custom_node_name="Hysteria2_Node"
 }
 
 inst_bandwidth(){
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
+    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     yellow " 拥塞控制配置 (降低延迟的核心)"
     purple " Hysteria 2 的 Brutal 算法需知晓服务器最大带宽。"
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
     read -p " 请输入 VPS 最大 上行带宽 (Mbps, 回车默认 1000)：" bw_up_input
     [[ -z $bw_up_input ]] && bw_up_input="1000"
     while [[ ! "$bw_up_input" =~ ^[0-9]+$ ]]; do
@@ -402,10 +414,11 @@ inst_bandwidth(){
 }
 
 inst_obfs(){
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
+    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     yellow " 防阻断混淆(Obfuscation)配置"
     purple " 开启 Salamander 混淆可防运营商 QoS 限速与封锁。"
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
     read -p " 是否开启混淆？(y/n) [默认: y]: " enable_obfs
     [[ -z $enable_obfs ]] && enable_obfs="y"
     if [[ "$enable_obfs" == "y" || "$enable_obfs" == "Y" ]]; then
@@ -415,7 +428,6 @@ inst_obfs(){
         obfs_pwd=""
         yellow " 已跳过混淆配置。"
     fi
-    cyan " ────────────────────────────────────────────────────────"
 }
 
 generate_client_configs() {
@@ -513,10 +525,10 @@ EOF
 
     local sub_cert_dir="$web_dir/certs"
     mkdir -p "$sub_cert_dir"
-    cp "$cert_path" "$sub_cert_dir/cert.crt" 2>/dev/null || cp /etc/hysteria/cert.crt "$sub_cert_dir/cert.crt" 2>/dev/null
-    cp "$key_path" "$sub_cert_dir/private.key" 2>/dev/null || cp /etc/hysteria/private.key "$sub_cert_dir/private.key" 2>/dev/null
-    chown -R nobody "$sub_cert_dir" 2>/dev/null
-    chmod 400 "$sub_cert_dir/private.key" 2>/dev/null
+    cp "$cert_path" "$sub_cert_dir/cert.crt" || cp /etc/hysteria/cert.crt "$sub_cert_dir/cert.crt"
+    cp "$key_path" "$sub_cert_dir/private.key" || cp /etc/hysteria/private.key "$sub_cert_dir/private.key"
+    chown -R nobody "$sub_cert_dir" || true
+    chmod 400 "$sub_cert_dir/private.key" || true
     
     cat << EOF > "$web_dir/server.py"
 import http.server
@@ -574,10 +586,10 @@ EOF
 
     chown -R nobody "$web_dir" || true
     
-    iptables -I INPUT -p tcp --dport $sub_port -j ACCEPT 2>/dev/null || true
-    ip6tables -I INPUT -p tcp --dport $sub_port -j ACCEPT 2>/dev/null || true
-    if command -v ufw >/dev/null 2>&1; then ufw allow $sub_port/tcp >/dev/null 2>&1; fi
-    if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --zone=public --add-port=$sub_port/tcp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1; fi
+    iptables -I INPUT -p tcp --dport $sub_port -j ACCEPT || true
+    ip6tables -I INPUT -p tcp --dport $sub_port -j ACCEPT || true
+    if command -v ufw >/dev/null 2>&1; then ufw allow $sub_port/tcp; fi
+    if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --zone=public --add-port=$sub_port/tcp --permanent; firewall-cmd --reload; fi
     save_iptables
     
     local py_path=$(command -v python3)
@@ -593,7 +605,7 @@ directory="${web_dir}"
 pidfile="/run/hysteria-sub.pid"
 EOF
         chmod +x /etc/init.d/hysteria-sub
-        rc-update add hysteria-sub default >/dev/null 2>&1
+        rc-update add hysteria-sub default
     else
         cat << EOF > /etc/systemd/system/hysteria-sub.service
 [Unit]
@@ -612,7 +624,7 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
-        systemctl enable hysteria-sub >/dev/null 2>&1
+        systemctl enable hysteria-sub
     fi
     
     svc_stop hysteria-sub
@@ -644,34 +656,40 @@ showconf(){
     local raw_url=$(cat "$web_dir/$sub_path/url.txt" 2>/dev/null)
     
     clear
-    green " ┌──────────────────────────────────────────────────────┐"
+    echo ""
+    green " ╭──────────────────────────────────────────────────────╮"
     green " │                Hysteria 2 全平台智能订阅             │"
-    green " └──────────────────────────────────────────────────────┘"
-    cyan " ────────────────────────────────────────────────────────"
+    green " ╰──────────────────────────────────────────────────────╯"
+    echo ""
     green " [智能订阅链接] (推荐)"
     purple " 适用客户端: Clash Verge / v2rayN / Shadowrocket"
     yellow " 订阅地址: ${sub_url}"
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
+    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+    echo ""
     green " [单节点直连链接]"
     purple " 适用客户端: NekoBox / v2rayNG (直接导入)"
     yellow " 节点地址: ${raw_url}"
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
+    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     
     if ! command -v qrencode &> /dev/null; then
+        echo ""
         yellow " 正在加载二维码模块..."
         if [[ $SYSTEM == "Ubuntu" || $SYSTEM == "Debian" ]]; then
-            apt-get update -y >/dev/null 2>&1
-            apt-get install -y qrencode >/dev/null 2>&1
+            apt-get update -y
+            apt-get install -y qrencode
         elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" || $SYSTEM == "Alma" || $SYSTEM == "Rocky" ]]; then
-            yum install -y epel-release >/dev/null 2>&1
-            yum install -y qrencode >/dev/null 2>&1
+            yum install -y epel-release
+            yum install -y qrencode
         elif [[ $SYSTEM == "Alpine" ]]; then
-            apk update >/dev/null 2>&1
-            apk add libqrencode-tools >/dev/null 2>&1
+            apk update
+            apk add libqrencode-tools
         fi
     fi
 
-    if command -v qrencode >/dev/null; then
+    echo ""
+    if command -v qrencode &> /dev/null; then
         purple " 提示：若二维码断层，请将终端字体缩小，或设置行间距为1.0"
         echo ""
         qrencode -t ANSIUTF8 "$raw_url"
@@ -679,11 +697,13 @@ showconf(){
         yellow " 正通过安全在线 API 绘制二维码..."
         curl -s -d "$raw_url" https://qrenco.de
     fi
-    cyan " ────────────────────────────────────────────────────────"
+    
+    echo ""
+    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     yellow " 使用说明："
     purple " 1. 打开 Shadowrocket 或 v2rayNG 扫一扫功能直接扫码。"
     purple " 2. 智能订阅会自动识别客户端！Clash 获取 YAML，v2rayN 获取 Base64。"
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
     read -p " 按回车键返回主菜单..."
     menu
 }
@@ -697,12 +717,14 @@ edit_config() {
         return
     fi
     
-    green " ┌──────────────────────────────────────────────────────┐"
+    echo ""
+    green " ╭──────────────────────────────────────────────────────╮"
     green " │                当前 Hysteria 2 节点配置              │"
-    green " └──────────────────────────────────────────────────────┘"
-    cyan " ────────────────────────────────────────────────────────"
+    green " ╰──────────────────────────────────────────────────────╯"
+    echo ""
     cat /etc/hysteria/config.yaml
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
+    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     read -p " 是否需要修改配置文件？(y/n) [默认: n]: " edit_choice
     if [[ "$edit_choice" == "y" || "$edit_choice" == "Y" ]]; then
         if command -v nano >/dev/null; then
@@ -713,13 +735,13 @@ edit_config() {
             red " 未找到 nano 或 vi 编辑器，请手动修改 /etc/hysteria/config.yaml"
         fi
         
-        cyan " ────────────────────────────────────────────────────────"
+        echo ""
         green " 配置修改完成，正在重启 Hysteria 2 服务..."
         svc_stop hysteria-server
         svc_start hysteria-server
         green " 重启成功！新配置已生效。"
     fi
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
     read -p " 按回车键返回主菜单..."
     menu
 }
@@ -756,10 +778,11 @@ EOF
     local traffic_data=$(curl -s "http://127.0.0.1:$api_port/traffic")
     
     clear
-    green " ┌──────────────────────────────────────────────────────┐"
+    echo ""
+    green " ╭──────────────────────────────────────────────────────╮"
     green " │                客户端连接与流量统计                  │"
-    green " └──────────────────────────────────────────────────────┘"
-    cyan " ────────────────────────────────────────────────────────"
+    green " ╰──────────────────────────────────────────────────────╯"
+    echo ""
     
     if [[ -z "$traffic_data" || "$traffic_data" =~ "404" ]]; then
         red " 获取数据失败，Hysteria 服务可能未正常运行。"
@@ -768,7 +791,8 @@ EOF
     else
         local client_count=$(echo "$traffic_data" | grep -o '"[^"]*":{[^}]*}' | grep -c '"tx"')
         green " 当前活跃客户端总数: $client_count"
-        cyan " ────────────────────────────────────────────────────────"
+        echo ""
+        cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
         
         echo "$traffic_data" | grep -o '"[^"]*":{[^}]*}' | grep '"tx"' | while read -r line; do
             user=$(echo "$line" | cut -d '"' -f2)
@@ -785,7 +809,7 @@ EOF
         done
     fi
     
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
     read -p " 按回车键返回主菜单..."
     menu
 }
@@ -801,7 +825,8 @@ insthysteria(){
     done
     echo "$api_port" > /etc/hysteria/api_port.txt
     
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
+    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     green " 正在下载 Hysteria 2 二进制核心..."
     arch=$(uname -m)
     case $arch in
@@ -817,7 +842,7 @@ insthysteria(){
     
     wget -N -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/download/${hy_ver}/hysteria-linux-${hy_arch}"
     if [[ $? -ne 0 ]]; then
-        red " Hysteria 2 核心下载失败，请检查网络！"
+        red " Hysteria 2 核心下载失败，请检查网络日志！"
         exit 1
     fi
     chmod +x /usr/local/bin/hysteria
@@ -928,10 +953,11 @@ EOF
     
     generate_client_configs
     
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
+    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     green " Hysteria 2 服务端及智能订阅安装部署完成！"
     purple " 请在主菜单选择 [ 5 ] 获取节点与二维码。"
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
     sleep 3
     menu
 }
@@ -940,33 +966,33 @@ unsthysteria(){
     local main_port=$(grep '^listen:' /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ')
     local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null)
 
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
     yellow " 正在安全地清理系统网络与防火墙规则..."
     if [[ -n "$main_port" && "$main_port" =~ ^[0-9]+$ ]]; then
-        iptables -D INPUT -p udp --dport $main_port -j ACCEPT 2>/dev/null || true
-        ip6tables -D INPUT -p udp --dport $main_port -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -p udp --dport $main_port -j ACCEPT || true
+        ip6tables -D INPUT -p udp --dport $main_port -j ACCEPT || true
         
         iptables-save -t nat | grep "DNAT --to-destination :$main_port" | sed 's/^-A /-D /' | while read -r rule; do
-            iptables -t nat $rule 2>/dev/null || true
+            iptables -t nat $rule || true
         done
         ip6tables-save -t nat | grep "DNAT --to-destination :$main_port" | sed 's/^-A /-D /' | while read -r rule; do
-            ip6tables -t nat $rule 2>/dev/null || true
+            ip6tables -t nat $rule || true
         done
 
-        if command -v ufw >/dev/null 2>&1; then ufw delete allow $main_port/udp >/dev/null 2>&1 || true; fi
-        if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --zone=public --remove-port=$main_port/udp --permanent >/dev/null 2>&1 || true; firewall-cmd --reload >/dev/null 2>&1 || true; fi
+        if command -v ufw >/dev/null 2>&1; then ufw delete allow $main_port/udp || true; fi
+        if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --zone=public --remove-port=$main_port/udp --permanent || true; firewall-cmd --reload || true; fi
     fi
     
     if [[ -n "$sub_port" && "$sub_port" =~ ^[0-9]+$ ]]; then
-        iptables -D INPUT -p tcp --dport $sub_port -j ACCEPT 2>/dev/null || true
-        if command -v ufw >/dev/null 2>&1; then ufw delete allow $sub_port/tcp >/dev/null 2>&1 || true; fi
-        if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --zone=public --remove-port=$sub_port/tcp --permanent >/dev/null 2>&1 || true; firewall-cmd --reload >/dev/null 2>&1 || true; fi
+        iptables -D INPUT -p tcp --dport $sub_port -j ACCEPT || true
+        if command -v ufw >/dev/null 2>&1; then ufw delete allow $sub_port/tcp || true; fi
+        if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --zone=public --remove-port=$sub_port/tcp --permanent || true; firewall-cmd --reload || true; fi
     fi
 
-    svc_stop hysteria-server >/dev/null 2>&1 || true
-    svc_disable hysteria-server >/dev/null 2>&1 || true
-    svc_stop hysteria-sub >/dev/null 2>&1 || true
-    svc_disable hysteria-sub >/dev/null 2>&1 || true
+    svc_stop hysteria-server || true
+    svc_disable hysteria-server || true
+    svc_stop hysteria-sub || true
+    svc_disable hysteria-sub || true
 
     if [[ $SYSTEM == "Alpine" ]]; then
         rm -f /etc/init.d/hysteria-server /etc/init.d/hysteria-sub
@@ -978,8 +1004,8 @@ unsthysteria(){
 
     rm -rf /usr/local/bin/hysteria /etc/hysteria /var/www/hysteria
 
+    echo ""
     green " Hysteria 2 服务及相关文件、端口规则已彻底清理！"
-    cyan " ────────────────────────────────────────────────────────"
     sleep 2
     exit 0
 }
@@ -999,16 +1025,18 @@ stophysteria_only(){
 
 hysteriaswitch(){
     clear
-    green " ┌──────────────────────────────────────────────────────┐"
+    echo ""
+    green " ╭──────────────────────────────────────────────────────╮"
     green " │                  服务运行状态控制                    │"
-    green " └──────────────────────────────────────────────────────┘"
-    cyan " ────────────────────────────────────────────────────────"
+    green " ╰──────────────────────────────────────────────────────╯"
+    echo ""
     green "   [1] 启动 Hysteria 2 及订阅服务"
     red "   [2] 停止 Hysteria 2 及订阅服务"
     yellow "   [3] 重启 Hysteria 2 及订阅服务"
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
+    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     purple "   [0] 返回主菜单"
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
     read -rp " 请输入选项 [0-3]: " switchInput
     case $switchInput in
         1 ) starthysteria ;;
@@ -1020,7 +1048,8 @@ hysteriaswitch(){
 }
 
 enable_bbr(){
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
+    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     local kernel_v=$(uname -r | cut -d. -f1)
     if [[ "$kernel_v" -lt 4 ]]; then
         red " 当前内核版本过低 ($(uname -r))，不支持开启 BBR！"
@@ -1047,37 +1076,45 @@ enable_bbr(){
     echo "net.core.wmem_default=26214400" >> /etc/sysctl.conf
     echo "net.ipv4.udp_mem=262144 524288 1048576" >> /etc/sysctl.conf
     
-    sysctl -p >/dev/null 2>&1
+    sysctl -p
     
+    echo ""
     green " BBR 及 UDP 缓冲区底层优化开启成功！可显著降低丢包率。"
-    cyan " ────────────────────────────────────────────────────────"
+    echo ""
     read -p " 按回车键返回主菜单..."
     menu
 }
 
 menu() {
     clear
-    green " ┌────────────────────────────────────────────────────────┐"
+    echo ""
+    green " ╭────────────────────────────────────────────────────────╮"
     green " │                                                        │"
     green " │       Hysteria 2 一键部署与管理脚本 (极致优化版)       │"
     green " │                                                        │"
-    green " └────────────────────────────────────────────────────────┘"
-    cyan " ──────────────────────────────────────────────────────────"
+    green " ╰────────────────────────────────────────────────────────╯"
+    echo ""
     green "  [核心功能]"
     green "   1. 安装部署 Hysteria 2"
-    red "   2. 彻底卸载 Hysteria 2"
-    cyan " ──────────────────────────────────────────────────────────"
+    red   "   2. 彻底卸载 Hysteria 2"
+    echo ""
+    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+    echo ""
     yellow "  [服务管理]"
     yellow "   3. 启动 / 停止 / 重启服务"
     yellow "   4. 查看 / 修改 配置文件"
-    cyan " ──────────────────────────────────────────────────────────"
+    echo ""
+    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+    echo ""
     purple "  [实用工具]"
     purple "   5. 获取 节点配置 与 订阅链接"
     purple "   6. 查看 客户端连接 与 流量统计"
     purple "   7. 开启 BBR 及 UDP 缓冲区加速 (推荐)"
-    cyan " ──────────────────────────────────────────────────────────"
-    red "   0. 退出脚本"
-    cyan " ──────────────────────────────────────────────────────────"
+    echo ""
+    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+    echo ""
+    red   "   0. 退出脚本"
+    echo ""
     read -rp " 请输入选项 [0-7]: " menuInput
     case $menuInput in
         1 ) insthysteria ;;
