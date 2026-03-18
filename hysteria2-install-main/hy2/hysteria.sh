@@ -30,7 +30,6 @@ print_line() {
 # =================================================================
 [[ $EUID -ne 0 ]] && red " [错误] 请在 root 用户下运行此脚本！" && exit 1
 
-# 【修复 5】增强 realpath 的系统兼容性，增加 readlink 和 echo 后备方案
 SCRIPT_PATH=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
 if [[ "$SCRIPT_PATH" != "/usr/local/bin/hy2" ]]; then
     cp -f "$0" /usr/local/bin/hy2
@@ -218,7 +217,7 @@ inst_cert() {
     green "                    Hysteria 2 证书配置                    "
     print_line
     echo ""
-    echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}必应自签伪装证书 (强制不安全/跳过证书验证，默认)${PLAIN}"
+    echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}必应自签伪装证书 (单人独享/免域名，默认)${PLAIN}"
     echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_PURPLE}Acme 脚本申请 (需 Cloudflare 域名托管)${PLAIN}"
     echo -e "    ${LIGHT_GREEN}[3]${PLAIN} ${LIGHT_YELLOW}自定义证书路径${PLAIN}"
     echo ""
@@ -255,7 +254,6 @@ inst_cert() {
                 echo ""
                 yellow " [警告] 域名解析的 IP ($domainIP) 与当前真实 IP ($ip) 不匹配！"
                 yellow " [警告] Hysteria 2 必须使用真实 IP 直连，请确保 Cloudflare 已关闭小云朵 (DNS Only)。"
-                yellow " [提示] 若您使用的是 IPv4/IPv6 双栈服务器，此处可能由于 IP 类型不一致出现误报，请自行确认解析无误。"
                 echo -en " ${LIGHT_YELLOW} ▶ 是否确认并继续？(y/n) [默认: y]: ${PLAIN}"
                 read force_cert
                 [[ -z $force_cert ]] && force_cert="y"
@@ -265,7 +263,6 @@ inst_cert() {
             echo ""
             print_line
             yellow "  准备使用 Cloudflare DNS API 申请证书"
-            purple "  推荐在 CF控制台 -> 我的个人资料 -> API 令牌 中获取 Token"
             print_line
             echo ""
             echo -en " ${LIGHT_YELLOW} ▶ 选择认证方式 [1. API Token(推荐) | 2. Global API Key]: ${PLAIN}"
@@ -291,12 +288,10 @@ inst_cert() {
             
             bash /root/.acme.sh/acme.sh --upgrade --auto-upgrade
             bash /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt
-            
             rm -f /root/cert.crt /root/private.key /root/ca.log
 
             yellow " 正在通过 DNS API 验证所有权，请留意下方执行日志 (约1-3分钟)..."
             bash /root/.acme.sh/acme.sh --issue --dns dns_cf -d ${domain} -k ec-256
-            
             mkdir -p /var/www/hysteria/certs
 
             if [[ $SYSTEM == "Alpine" ]]; then
@@ -400,7 +395,6 @@ inst_port() {
         done
         green " 已开启端口跳跃范围: $firstport - $endport"
 
-        # 【修复 2】持久化存储跳跃端口范围，用于后续完整清理
         echo "$firstport:$endport" > /etc/hysteria/port_hop.txt
 
         modprobe ip6table_nat 2>/dev/null || true
@@ -463,6 +457,7 @@ inst_other_configs() {
     print_line
     yellow "  拥塞控制配置 (降低延迟的核心)"
     purple "  输入 0 将关闭 Brutal 算法并开启 BBR 回退自适应模式 (适合弱网或未知环境)"
+    purple "  【优化提示】服务端已配置防滥用机制，将强制接管带宽上限！"
     echo ""
     echo -en " ${LIGHT_YELLOW} ▶ 请输入 VPS 最大上行带宽 (Mbps, 输入 0 开启 BBR 自适应模式): ${PLAIN}"
     read bw_up_input
@@ -486,11 +481,11 @@ inst_other_configs() {
         bw_down="${bw_down_input} mbps"
         
         echo ""
-        purple "  为保证 Brutal 算法在客户端高效执行，请填写客户端期望速度："
-        echo -en " ${LIGHT_YELLOW} ▶ 客户端期望下载速度 (Mbps, 回车默认 500): ${PLAIN}"
+        purple "  为生成最佳的客户端配置，请填写您本地网络（家庭/公司）的实际宽带速度："
+        echo -en " ${LIGHT_YELLOW} ▶ 本地真实下载速度 (Mbps, 回车默认 500): ${PLAIN}"
         read c_down
         [[ -z $c_down ]] && c_down="500"
-        echo -en " ${LIGHT_YELLOW} ▶ 客户端期望上传速度 (Mbps, 回车默认 50): ${PLAIN}"
+        echo -en " ${LIGHT_YELLOW} ▶ 本地真实上传速度 (Mbps, 回车默认 50): ${PLAIN}"
         read c_up
         [[ -z $c_up ]] && c_up="50"
         echo "$c_down" > /etc/hysteria/c_down.txt
@@ -537,7 +532,6 @@ clean_env() {
         eval ip6tables -t nat $rule 2>/dev/null
     done
 
-    # 【修复 2】完整清理 UFW 和 firewall-cmd 中的跳跃端口
     if [[ -f /etc/hysteria/port_hop.txt ]]; then
         local hop_range=$(cat /etc/hysteria/port_hop.txt)
         local f_port=$(echo $hop_range | cut -d':' -f1)
@@ -631,7 +625,6 @@ generate_client_configs() {
     local url="hy2://$s_pwd@$uri_ip:$primary_port/?insecure=${is_insecure_url}&sni=$c_domain${mport_param}${obfs_param}#${custom_node_name}"
     echo "$url" > "$web_dir/$sub_uuid/url.txt"
     
-    # 【修复 1】解决 echo 追加隐藏换行符导致 base64 订阅链接解析异常的 Bug
     printf "%s" "$url" | base64 | tr -d '\r\n' > "$web_dir/$sub_uuid/sub_b64.txt"
 
     cat << EOF > "$web_dir/$sub_uuid/clash-meta-sub.yaml"
@@ -679,7 +672,6 @@ EOF
     chown -R nobody "$sub_cert_dir"
     chmod 400 "$sub_cert_dir/private.key" 2>/dev/null
     
-    # 【修复 4】增强 DualStackServer 动态探测，安全启用 IPv6 监听而不影响纯 IPv4 环境
     cat << EOF > "$web_dir/server.py"
 import http.server
 import socketserver
@@ -731,7 +723,6 @@ class SecureSubHandler(http.server.BaseHTTPRequestHandler):
 class DualStackServer(socketserver.TCPServer):
     allow_reuse_address = True
     try:
-        # 探测内核是否真正支持 IPv6，如果支持则绑定双栈，否则回退
         s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
         s.close()
         address_family = socket.AF_INET6
@@ -815,7 +806,6 @@ insthysteria() {
     
     wget -N -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}"
     
-    # 【修复 3】增加完整性校验防范 CDN 故障导致的 0 字节死循环
     if [[ $? -ne 0 ]] || [[ ! -s /usr/local/bin/hysteria ]]; then
         red " [错误] Hysteria 2 核心下载失败或文件损坏，请根据上方输出排查网络！"
         rm -f /usr/local/bin/hysteria
@@ -871,11 +861,14 @@ EOF
     fi
     echo "$cert_insecure_url" > /etc/hysteria/insecure_state.txt
 
+    # ===============================
+    # 核心配置文件注入逻辑 (融合所有进阶优化)
+    # ===============================
     cat << EOF > /etc/hysteria/config.yaml
 listen: :$port
 
 quic:
-  mtu: 1350
+  mtu: 1400
 
 tls:
   cert: $cert_path
@@ -888,7 +881,8 @@ auth:
 $(if [[ "$bw_up_input" != "0" ]]; then
 echo "bandwidth:
   up: $bw_up
-  down: $bw_down"
+  down: $bw_down
+ignoreClientBandwidth: true"
 fi)
 
 $(if [[ -n "$obfs_pwd" ]]; then
@@ -897,6 +891,22 @@ echo "obfs:
   salamander:
     password: \"$obfs_pwd\""
 fi)
+
+resolver:
+  type: udp
+  udp:
+    addr: 8.8.8.8:53
+    timeout: 4s
+
+acl:
+  inline:
+    - reject(127.0.0.0/8)
+    - reject(10.0.0.0/8)
+    - reject(172.16.0.0/12)
+    - reject(192.168.0.0/16)
+    - reject(fc00::/7)
+    - reject(fe80::/10)
+    - direct(all)
 
 masquerade:
   type: proxy
@@ -1199,6 +1209,9 @@ hysteriaswitch() {
     esac
 }
 
+# ===============================
+# 内核参数极限调优模块更新
+# ===============================
 enable_bbr() {
     echo ""
     print_line
@@ -1215,6 +1228,7 @@ enable_bbr() {
         fi
     fi
     
+    # 清理旧的系统参数避免重复叠加
     sed -i '/^[[:space:]]*net\.core\.default_qdisc/d' /etc/sysctl.conf
     sed -i '/^[[:space:]]*net\.ipv4\.tcp_congestion_control/d' /etc/sysctl.conf
     sed -i '/^[[:space:]]*net\.core\.rmem_max/d' /etc/sysctl.conf
@@ -1222,19 +1236,25 @@ enable_bbr() {
     sed -i '/^[[:space:]]*net\.core\.wmem_max/d' /etc/sysctl.conf
     sed -i '/^[[:space:]]*net\.core\.wmem_default/d' /etc/sysctl.conf
     sed -i '/^[[:space:]]*net\.ipv4\.udp_mem/d' /etc/sysctl.conf
+    sed -i '/^[[:space:]]*net\.core\.netdev_max_backlog/d' /etc/sysctl.conf
+    sed -i '/^[[:space:]]*net\.core\.somaxconn/d' /etc/sysctl.conf
 
+    # 注入极限高并发 UDP 队列调优参数
     echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
     echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
     echo "net.core.rmem_max=26214400" >> /etc/sysctl.conf
     echo "net.core.rmem_default=26214400" >> /etc/sysctl.conf
     echo "net.core.wmem_max=26214400" >> /etc/sysctl.conf
     echo "net.core.wmem_default=26214400" >> /etc/sysctl.conf
-    echo "net.ipv4.udp_mem=262144 524288 1048576" >> /etc/sysctl.conf
+    echo "net.core.netdev_max_backlog=100000" >> /etc/sysctl.conf
+    echo "net.core.somaxconn=65535" >> /etc/sysctl.conf
+    echo "net.ipv4.udp_mem=65536 131072 262144" >> /etc/sysctl.conf
     
     sysctl -p 2>/dev/null
     
     echo ""
-    green "  BBR 及 UDP 缓冲区底层优化开启成功！可显著降低丢包率。"
+    green "  BBR 及极致的 UDP 缓冲区底层调优开启成功！"
+    yellow "  已显著拉升最大并发连接数和收发包深度，可有效抵抗大流量时的丢包状况。"
     echo ""
     echo -en " ${LIGHT_YELLOW} ▶ 按回车键返回主菜单... ${PLAIN}"
     read temp
@@ -1322,7 +1342,7 @@ menu() {
     echo -e "${LIGHT_GREEN}  ██████╔╝ ╚██████╔╝ ╚██████╔╝███████╗ ██║  ██║${PLAIN}"
     echo -e "${LIGHT_GREEN}  ╚═════╝   ╚══════╝  ╚═════╝ ╚══════╝ ╚═╝  ╚═╝${PLAIN}"
     green "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
-    green " 项目名称 ：Hysteria 2 一键部署与管理脚本 (深度加固版)"
+    green " 项目名称 ：Hysteria 2 一键部署与管理脚本 (单人旗舰加固版)"
     purple " 项目地址 ：哆啦的Github库 https://github.com/yanbinlti-glitch"
     green "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
     yellow " 脚本快捷方式：hy2 (已自动配置，下次可在终端直接输入 hy2 启动)"
@@ -1335,7 +1355,7 @@ menu() {
     echo "----------------------------------------------------------------------------------"
     echo -e "  ${LIGHT_GREEN}[5]${PLAIN} ${LIGHT_GREEN}获取 节点配置 与 订阅链接${PLAIN}"
     echo -e "  ${LIGHT_GREEN}[6]${PLAIN} ${LIGHT_YELLOW}查看 客户端连接 与 流量统计${PLAIN}"
-    echo -e "  ${LIGHT_GREEN}[7]${PLAIN} ${LIGHT_PURPLE}开启 BBR 及 UDP 缓冲区加速 (推荐)${PLAIN}"
+    echo -e "  ${LIGHT_GREEN}[7]${PLAIN} ${LIGHT_PURPLE}开启 BBR 及 UDP 极限并发加速 (强烈推荐)${PLAIN}"
     echo -e "  ${LIGHT_GREEN}[8]${PLAIN} ${LIGHT_GREEN}检查 证书安装状态与详细信息${PLAIN}"
     echo "----------------------------------------------------------------------------------"
     echo -e "  ${LIGHT_GREEN}[0]${PLAIN} ${LIGHT_RED}退出脚本${PLAIN}"
