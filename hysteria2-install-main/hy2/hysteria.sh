@@ -30,7 +30,7 @@ print_line() {
 # =================================================================
 [[ $EUID -ne 0 ]] && red " [错误] 请在 root 用户下运行此脚本！" && exit 1
 
-SCRIPT_PATH=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
+SCRIPT_PATH=$(realpath "$0" || readlink -f "$0" || echo "$0")
 if [[ "$SCRIPT_PATH" != "/usr/local/bin/hy2" ]]; then
     cp -f "$0" /usr/local/bin/hy2
     chmod +x /usr/local/bin/hy2
@@ -41,7 +41,7 @@ RELEASE=("Alpine" "Debian" "Ubuntu" "CentOS" "CentOS" "Fedora")
 PACKAGE_UPDATE=("apk update" "apt-get update" "apt-get update" "yum -y update" "yum -y update" "yum -y update")
 PACKAGE_INSTALL=("apk add" "apt -y install" "apt -y install" "yum -y install" "yum -y install" "yum -y install")
 
-CMD=("$(grep -i pretty_name /etc/os-release 2>/dev/null | cut -d \" -f2)" "$(hostnamectl 2>/dev/null | grep -i system | cut -d : -f2)" "$(lsb_release -sd 2>/dev/null)" "$(grep -i description /etc/lsb-release 2>/dev/null | cut -d \" -f2)" "$(grep . /etc/redhat-release 2>/dev/null)" "$(grep . /etc/issue 2>/dev/null | cut -d \\ -f1 | sed '/^[ ]*$/d')")
+CMD=("$(grep -i pretty_name /etc/os-release | cut -d \" -f2)" "$(hostnamectl | grep -i system | cut -d : -f2)" "$(lsb_release -sd)" "$(grep -i description /etc/lsb-release | cut -d \" -f2)" "$(grep . /etc/redhat-release)" "$(grep . /etc/issue | cut -d \\ -f1 | sed '/^[ ]*$/d')")
 
 for i in "${CMD[@]}"; do
     SYS="$i" && [[ -n $SYS ]] && break
@@ -79,11 +79,11 @@ realip() {
 # 随机高强度字符生成
 gen_random_str() {
     local len=$1
-    cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -d '-' | cut -c 1-$len || head -c 16 /dev/urandom | od -A n -t x1 | tr -d ' \n' | cut -c 1-$len
+    cat /proc/sys/kernel/random/uuid | tr -d '-' | cut -c 1-$len || head -c 16 /dev/urandom | od -A n -t x1 | tr -d ' \n' | cut -c 1-$len
 }
 
 # =================================================================
-#  3. 服务管理与防火墙控制封装
+#  3. 服务管理与防火墙控制封装 (全部开放原生报错输出)
 # =================================================================
 svc_start()   { if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" start; else systemctl start "$1"; fi; }
 svc_stop()    { if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" stop; else systemctl stop "$1"; fi; }
@@ -92,14 +92,14 @@ svc_disable() { if [[ $SYSTEM == "Alpine" ]]; then rc-update del "$1" default; e
 
 save_iptables() {
     if [[ $SYSTEM == "Alpine" ]]; then
-        rc-service iptables save 2>/dev/null
-        rc-service ip6tables save 2>/dev/null
+        rc-service iptables save
+        rc-service ip6tables save
     elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" || $SYSTEM == "Alma" || $SYSTEM == "Rocky" ]]; then
-        service iptables save 2>/dev/null
-        service ip6tables save 2>/dev/null
+        service iptables save
+        service ip6tables save
     else
-        if command -v netfilter-persistent >/dev/null 2>&1; then
-            netfilter-persistent save 2>/dev/null
+        if command -v netfilter-persistent >/dev/null; then
+            netfilter-persistent save
         fi
     fi
 }
@@ -107,12 +107,12 @@ save_iptables() {
 open_port() {
     local port=$1
     local proto=$2
-    iptables -I INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null
-    ip6tables -I INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null
-    if command -v ufw >/dev/null 2>&1; then ufw allow $port/$proto 2>/dev/null; fi
-    if command -v firewall-cmd >/dev/null 2>&1; then
-        firewall-cmd --zone=public --add-port=$port/$proto --permanent 2>/dev/null
-        firewall-cmd --reload 2>/dev/null
+    iptables -I INPUT -p $proto --dport $port -j ACCEPT
+    ip6tables -I INPUT -p $proto --dport $port -j ACCEPT
+    if command -v ufw >/dev/null; then ufw allow $port/$proto; fi
+    if command -v firewall-cmd >/dev/null; then
+        firewall-cmd --zone=public --add-port=$port/$proto --permanent
+        firewall-cmd --reload
     fi
     save_iptables
 }
@@ -120,12 +120,12 @@ open_port() {
 close_port() {
     local port=$1
     local proto=$2
-    iptables -D INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null
-    ip6tables -D INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null
-    if command -v ufw >/dev/null 2>&1; then ufw delete allow $port/$proto 2>/dev/null; fi
-    if command -v firewall-cmd >/dev/null 2>&1; then
-        firewall-cmd --zone=public --remove-port=$port/$proto --permanent 2>/dev/null
-        firewall-cmd --reload 2>/dev/null
+    iptables -D INPUT -p $proto --dport $port -j ACCEPT
+    ip6tables -D INPUT -p $proto --dport $port -j ACCEPT
+    if command -v ufw >/dev/null; then ufw delete allow $port/$proto; fi
+    if command -v firewall-cmd >/dev/null; then
+        firewall-cmd --zone=public --remove-port=$port/$proto --permanent
+        firewall-cmd --reload
     fi
     save_iptables
 }
@@ -148,7 +148,7 @@ check_env() {
     local missing=0
 
     for cmd in "${cmds[@]}"; do
-        if ! command -v "$cmd" &> /dev/null; then
+        if ! command -v "$cmd" > /dev/null; then
             red "   [✘] 缺失:  $cmd"
             missing=1
         else
@@ -156,7 +156,7 @@ check_env() {
         fi
     done
 
-    if ! command -v crontab &> /dev/null; then
+    if ! command -v crontab > /dev/null; then
         red "   [✘] 缺失:  crontab (用于证书自动续期)"
         missing=1
     else
@@ -164,7 +164,7 @@ check_env() {
     fi
 
     if [[ $SYSTEM == "Debian" || $SYSTEM == "Ubuntu" ]]; then
-        if ! command -v netfilter-persistent &> /dev/null; then
+        if ! command -v netfilter-persistent > /dev/null; then
             red "   [✘] 缺失:  netfilter-persistent (用于防火墙保存)"
             missing=1
         else
@@ -229,7 +229,7 @@ inst_cert() {
         cert_path="/root/cert.crt"
         key_path="/root/private.key"
         if [[ -f /root/cert.crt && -f /root/private.key && -f /root/ca.log ]]; then
-            domain=$(cat /root/ca.log 2>/dev/null | tr -d '\r')
+            domain=$(cat /root/ca.log | tr -d '\r')
             echo ""
             green " 检测到原有域名：$domain 的证书，正在直接应用..."
             hy_domain="$domain"
@@ -242,7 +242,7 @@ inst_cert() {
             domain=$(echo "$domain" | tr -d '\r' | tr -d ' ')
             green " 已记录域名：$domain"
             
-            domainIP=$(python3 -c "import socket; print(socket.getaddrinfo('${domain}', None)[0][4][0])" 2>/dev/null || echo "")
+            domainIP=$(python3 -c "import socket; print(socket.getaddrinfo('${domain}', None)[0][4][0])" || echo "")
             
             if [[ -z "$domainIP" ]]; then
                 echo ""
@@ -356,8 +356,8 @@ inst_cert() {
         cert_path="/etc/hysteria/cert.crt"
         key_path="/etc/hysteria/private.key"
         
-        openssl ecparam -genkey -name prime256v1 -out /etc/hysteria/private.key 2>/dev/null
-        openssl req -new -x509 -days 36500 -key /etc/hysteria/private.key -out /etc/hysteria/cert.crt -subj "/CN=www.bing.com" 2>/dev/null
+        openssl ecparam -genkey -name prime256v1 -out /etc/hysteria/private.key
+        openssl req -new -x509 -days 36500 -key /etc/hysteria/private.key -out /etc/hysteria/cert.crt -subj "/CN=www.bing.com"
         chmod 644 /etc/hysteria/cert.crt; chmod 600 /etc/hysteria/private.key
 
         hy_domain="www.bing.com"
@@ -416,13 +416,13 @@ inst_port() {
 
         echo "$firstport:$endport" > /etc/hysteria/port_hop.txt
 
-        modprobe ip6table_nat 2>/dev/null || true
-        iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop" 2>/dev/null
-        ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop" 2>/dev/null
-        if command -v ufw >/dev/null 2>&1; then ufw allow $firstport:$endport/udp 2>/dev/null; fi
-        if command -v firewall-cmd >/dev/null 2>&1; then
-            firewall-cmd --zone=public --add-port=$firstport-$endport/udp --permanent 2>/dev/null
-            firewall-cmd --reload 2>/dev/null
+        modprobe ip6table_nat || true
+        iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop"
+        ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop"
+        if command -v ufw >/dev/null; then ufw allow $firstport:$endport/udp; fi
+        if command -v firewall-cmd >/dev/null; then
+            firewall-cmd --zone=public --add-port=$firstport-$endport/udp --permanent
+            firewall-cmd --reload
         fi
         save_iptables
     fi
@@ -538,32 +538,32 @@ inst_other_configs() {
 clean_env() {
     local mode="$1"
     
-    local main_port=$(grep -E "^[[:space:]]*listen:" /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ' | tr -d '\r')
-    local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null | tr -d '\r')
+    local main_port=$(grep -E "^[[:space:]]*listen:" /etc/hysteria/config.yaml | awk -F ':' '{print $NF}' | tr -d ' ' | tr -d '\r')
+    local sub_port=$(cat /etc/hysteria/sub_port.txt | tr -d '\r')
 
     [[ -n "$main_port" && "$main_port" =~ ^[0-9]+$ ]] && close_port "$main_port" "udp"
     [[ -n "$sub_port" && "$sub_port" =~ ^[0-9]+$ ]] && close_port "$sub_port" "tcp"
 
-    if command -v iptables >/dev/null 2>&1; then
-        iptables -t nat -nL PREROUTING --line-numbers 2>/dev/null | grep "hy2-port-hop" | awk '{print $1}' | sort -nr | while read -r num; do
-            iptables -t nat -D PREROUTING "$num" 2>/dev/null
+    if command -v iptables >/dev/null; then
+        iptables -t nat -nL PREROUTING --line-numbers | grep "hy2-port-hop" | awk '{print $1}' | sort -nr | while read -r num; do
+            iptables -t nat -D PREROUTING "$num"
         done
     fi
-    if command -v ip6tables >/dev/null 2>&1; then
-        ip6tables -t nat -nL PREROUTING --line-numbers 2>/dev/null | grep "hy2-port-hop" | awk '{print $1}' | sort -nr | while read -r num; do
-            ip6tables -t nat -D PREROUTING "$num" 2>/dev/null
+    if command -v ip6tables >/dev/null; then
+        ip6tables -t nat -nL PREROUTING --line-numbers | grep "hy2-port-hop" | awk '{print $1}' | sort -nr | while read -r num; do
+            ip6tables -t nat -D PREROUTING "$num"
         done
     fi
 
     if [[ -f /etc/hysteria/port_hop.txt ]]; then
-        local hop_range=$(cat /etc/hysteria/port_hop.txt 2>/dev/null | tr -d '\r')
+        local hop_range=$(cat /etc/hysteria/port_hop.txt | tr -d '\r')
         local f_port=$(echo "$hop_range" | cut -d':' -f1)
         local e_port=$(echo "$hop_range" | cut -d':' -f2)
         if [[ -n "$f_port" && -n "$e_port" ]]; then
-            if command -v ufw >/dev/null 2>&1; then ufw delete allow "$f_port:$e_port/udp" 2>/dev/null; fi
-            if command -v firewall-cmd >/dev/null 2>&1; then
-                firewall-cmd --zone=public --remove-port="$f_port-$e_port/udp" --permanent 2>/dev/null
-                firewall-cmd --reload 2>/dev/null
+            if command -v ufw >/dev/null; then ufw delete allow "$f_port:$e_port/udp"; fi
+            if command -v firewall-cmd >/dev/null; then
+                firewall-cmd --zone=public --remove-port="$f_port-$e_port/udp" --permanent
+                firewall-cmd --reload
             fi
         fi
     else
@@ -571,14 +571,14 @@ clean_env() {
         yellow "  [提示] 未找到端口跳跃记录文件。如果您之前开启了端口跳跃，请手动检查并清理 UFW / Firewalld 中的 UDP 端口范围。"
     fi
 
-    svc_stop hysteria-server 2>/dev/null; svc_disable hysteria-server 2>/dev/null
-    svc_stop hysteria-sub 2>/dev/null; svc_disable hysteria-sub 2>/dev/null
+    svc_stop hysteria-server; svc_disable hysteria-server
+    svc_stop hysteria-sub; svc_disable hysteria-sub
 
     if [[ $SYSTEM == "Alpine" ]]; then
         rm -f /etc/init.d/hysteria-server /etc/init.d/hysteria-sub
     else
         rm -f /etc/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-sub.service
-        systemctl daemon-reload 2>/dev/null
+        systemctl daemon-reload
     fi
     save_iptables
 
@@ -603,7 +603,7 @@ generate_client_configs() {
     local hop_ports=$(echo "$c_ports" | awk -F ',' '{print $2}')
     
     local s_obfs_pwd=$(awk '/obfs:/{flag=1} flag && /password:/{print $2; flag=0}' /etc/hysteria/config.yaml | tr -d '"' | tr -d "'")
-    local is_insecure_url=$(cat /etc/hysteria/insecure_state.txt 2>/dev/null || echo "1")
+    local is_insecure_url=$(cat /etc/hysteria/insecure_state.txt || echo "1")
     
     local clash_cert_verify="false"
     
@@ -622,8 +622,8 @@ generate_client_configs() {
         clash_obfs_block="    obfs: salamander\n    obfs-password: \"$s_obfs_pwd\""
     fi
 
-    local c_up=$(cat /etc/hysteria/c_up.txt 2>/dev/null || echo "0")
-    local c_down=$(cat /etc/hysteria/c_down.txt 2>/dev/null || echo "0")
+    local c_up=$(cat /etc/hysteria/c_up.txt || echo "0")
+    local c_down=$(cat /etc/hysteria/c_down.txt || echo "0")
     local clash_bw_block=""
     if [[ "$c_up" != "0" ]]; then
         clash_bw_block="    up: '${c_up} mbps'\n    down: '${c_down} mbps'"
@@ -688,15 +688,15 @@ rules:
   - MATCH,节点选择
 EOF
 
-    local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null)
+    local sub_port=$(cat /etc/hysteria/sub_port.txt)
     local sub_cert_dir="$web_dir/certs"
     mkdir -p "$sub_cert_dir"
     
-    cp -L "$cert_path" "$sub_cert_dir/cert.crt" 2>/dev/null || cp -L /etc/hysteria/cert.crt "$sub_cert_dir/cert.crt" 2>/dev/null
-    cp -L "$key_path" "$sub_cert_dir/private.key" 2>/dev/null || cp -L /etc/hysteria/private.key "$sub_cert_dir/private.key" 2>/dev/null
+    cp -L "$cert_path" "$sub_cert_dir/cert.crt" || cp -L /etc/hysteria/cert.crt "$sub_cert_dir/cert.crt"
+    cp -L "$key_path" "$sub_cert_dir/private.key" || cp -L /etc/hysteria/private.key "$sub_cert_dir/private.key"
     
     chown -R nobody "$sub_cert_dir"
-    chmod 400 "$sub_cert_dir/private.key" 2>/dev/null
+    chmod 400 "$sub_cert_dir/private.key"
     
     cat << EOF > "$web_dir/server.py"
 import http.server
@@ -800,7 +800,7 @@ EOF
         systemctl enable hysteria-sub
     fi
     
-    svc_stop hysteria-sub 2>/dev/null
+    svc_stop hysteria-sub
     svc_start hysteria-sub
 }
 
@@ -991,12 +991,12 @@ unsthysteria() {
 showconf() {
     realip
     
-    local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null)
-    local sub_path=$(cat /etc/hysteria/sub_path.txt 2>/dev/null)
-    local sub_host=$(cat /etc/hysteria/sub_host.txt 2>/dev/null)
-    local is_insecure=$(cat /etc/hysteria/insecure_state.txt 2>/dev/null)
-    local main_port=$(grep -E "^[[:space:]]*listen:" /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ' | tr -d '\r')
-    local hop_ports=$(grep '^server:' /etc/hysteria/hy-client.yaml 2>/dev/null | awk -F ',' '{print $2}')
+    local sub_port=$(cat /etc/hysteria/sub_port.txt)
+    local sub_path=$(cat /etc/hysteria/sub_path.txt)
+    local sub_host=$(cat /etc/hysteria/sub_host.txt)
+    local is_insecure=$(cat /etc/hysteria/insecure_state.txt)
+    local main_port=$(grep -E "^[[:space:]]*listen:" /etc/hysteria/config.yaml | awk -F ':' '{print $NF}' | tr -d ' ' | tr -d '\r')
+    local hop_ports=$(grep '^server:' /etc/hysteria/hy-client.yaml | awk -F ',' '{print $2}')
     
     [[ -z "$sub_host" || "$sub_host" == "" ]] && sub_host=$ip
     
@@ -1011,7 +1011,7 @@ showconf() {
     fi
 
     local web_dir="/var/www/hysteria"
-    local raw_url=$(cat "$web_dir/$sub_path/url.txt" 2>/dev/null)
+    local raw_url=$(cat "$web_dir/$sub_path/url.txt")
     
     clear
     echo ""
@@ -1028,7 +1028,7 @@ showconf() {
     green  "    节点地址: ${raw_url}"
     echo ""
     
-    if ! command -v qrencode &> /dev/null; then
+    if ! command -v qrencode > /dev/null; then
         yellow "  正在加载二维码模块..."
         if [[ $SYSTEM == "Ubuntu" || $SYSTEM == "Debian" ]]; then
             apt-get update -y
@@ -1042,7 +1042,7 @@ showconf() {
         fi
     fi
 
-    if command -v qrencode &> /dev/null; then
+    if command -v qrencode > /dev/null; then
         echo ""
         purple "  提示：若二维码断层，请将终端字体缩小，或设置行间距为1.0"
         echo ""
@@ -1154,10 +1154,10 @@ EOF
         return
     else
         local api_port=$(awk '/^[[:space:]]*trafficStats:/{flag=1} flag && /listen:/{print $NF; exit}' /etc/hysteria/config.yaml | awk -F ':' '{print $NF}' | tr -d '\r' | tr -d ' ')
-        [[ -z "$api_port" ]] && api_port=$(cat /etc/hysteria/api_port.txt 2>/dev/null | tr -d '\r')
+        [[ -z "$api_port" ]] && api_port=$(cat /etc/hysteria/api_port.txt | tr -d '\r')
     fi
 
-    local traffic_data=$(curl -s --max-time 3 "http://127.0.0.1:$api_port/traffic")
+    local traffic_data=$(curl --max-time 3 "http://127.0.0.1:$api_port/traffic")
     
     clear
     echo ""
@@ -1252,8 +1252,8 @@ enable_bbr() {
         sleep 3; return
     fi
 
-    if ! modprobe tcp_bbr 2>/dev/null; then
-        if ! grep -q "bbr" /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+    if ! modprobe tcp_bbr; then
+        if ! grep -q "bbr" /proc/sys/net/ipv4/tcp_available_congestion_control; then
             red "  [错误] 当前系统/内核 (可能是 LXC 容器) 彻底不支持 BBR 模块！"
             sleep 3; return
         fi
@@ -1281,7 +1281,7 @@ enable_bbr() {
     echo "net.core.somaxconn=65535" >> /etc/sysctl.conf
     echo "net.ipv4.udp_mem=65536 131072 262144" >> /etc/sysctl.conf
     
-    sysctl -p 2>/dev/null
+    sysctl -p
     
     echo ""
     green "  BBR 及极致的 UDP 缓冲区底层调优开启成功！"
@@ -1317,18 +1317,18 @@ check_cert() {
         purple "  所在路径: $cert_path"
         echo ""
         
-        if command -v openssl >/dev/null 2>&1; then
-            local cert_subject=$(openssl x509 -in "$cert_path" -noout -subject 2>/dev/null | awk -F'CN = |CN=' '{print $2}' | awk -F',' '{print $1}')
-            local cert_issuer=$(openssl x509 -in "$cert_path" -noout -issuer 2>/dev/null | awk -F'CN = |CN=|O = |O=' '{print $2}' | awk -F',' '{print $1}')
-            local cert_start=$(openssl x509 -in "$cert_path" -noout -startdate 2>/dev/null | cut -d= -f2)
-            local cert_end=$(openssl x509 -in "$cert_path" -noout -enddate 2>/dev/null | cut -d= -f2)
+        if command -v openssl >/dev/null; then
+            local cert_subject=$(openssl x509 -in "$cert_path" -noout -subject | awk -F'CN = |CN=' '{print $2}' | awk -F',' '{print $1}')
+            local cert_issuer=$(openssl x509 -in "$cert_path" -noout -issuer | awk -F'CN = |CN=|O = |O=' '{print $2}' | awk -F',' '{print $1}')
+            local cert_start=$(openssl x509 -in "$cert_path" -noout -startdate | cut -d= -f2)
+            local cert_end=$(openssl x509 -in "$cert_path" -noout -enddate | cut -d= -f2)
             
             yellow "  ▶ 绑定的域名 (CN) : ${cert_subject:-未知}"
             yellow "  ▶ 证书颁发机构    : ${cert_issuer:-未知}"
             yellow "  ▶ 证书生效日期    : $cert_start"
             
-            local end_epoch=$(date -d "$cert_end" +%s 2>/dev/null)
-            local now_epoch=$(date +%s 2>/dev/null)
+            local end_epoch=$(date -d "$cert_end" +%s)
+            local now_epoch=$(date +%s)
             if [[ -n "$end_epoch" && -n "$now_epoch" && "$end_epoch" =~ ^[0-9]+$ ]]; then
                 local days_left=$(( (end_epoch - now_epoch) / 86400 ))
                 if [[ $days_left -lt 0 ]]; then
