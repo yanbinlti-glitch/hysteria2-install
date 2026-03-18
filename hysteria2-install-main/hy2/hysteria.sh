@@ -85,26 +85,29 @@ svc_enable()  { if [[ $SYSTEM == "Alpine" ]]; then rc-update add "$1" default; e
 svc_disable() { if [[ $SYSTEM == "Alpine" ]]; then rc-update del "$1" default; else systemctl disable "$1"; fi; }
 
 save_iptables() {
+    # 修复未安装 netfilter-persistent 时的报错，增加容错机制
     if [[ $SYSTEM == "Alpine" ]]; then
-        rc-service iptables save
-        rc-service ip6tables save
-    elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" ]]; then
-        service iptables save
-        service ip6tables save
+        rc-service iptables save 2>/dev/null
+        rc-service ip6tables save 2>/dev/null
+    elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" || $SYSTEM == "Alma" || $SYSTEM == "Rocky" ]]; then
+        service iptables save 2>/dev/null
+        service ip6tables save 2>/dev/null
     else
-        netfilter-persistent save
+        if command -v netfilter-persistent >/dev/null 2>&1; then
+            netfilter-persistent save 2>/dev/null
+        fi
     fi
 }
 
 open_port() {
     local port=$1
     local proto=$2
-    iptables -I INPUT -p $proto --dport $port -j ACCEPT
-    ip6tables -I INPUT -p $proto --dport $port -j ACCEPT
-    if command -v ufw >/dev/null 2>&1; then ufw allow $port/$proto; fi
+    iptables -I INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null
+    ip6tables -I INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null
+    if command -v ufw >/dev/null 2>&1; then ufw allow $port/$proto 2>/dev/null; fi
     if command -v firewall-cmd >/dev/null 2>&1; then
-        firewall-cmd --zone=public --add-port=$port/$proto --permanent
-        firewall-cmd --reload
+        firewall-cmd --zone=public --add-port=$port/$proto --permanent 2>/dev/null
+        firewall-cmd --reload 2>/dev/null
     fi
     save_iptables
 }
@@ -112,12 +115,12 @@ open_port() {
 close_port() {
     local port=$1
     local proto=$2
-    iptables -D INPUT -p $proto --dport $port -j ACCEPT
-    ip6tables -D INPUT -p $proto --dport $port -j ACCEPT
-    if command -v ufw >/dev/null 2>&1; then ufw delete allow $port/$proto; fi
+    iptables -D INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null
+    ip6tables -D INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null
+    if command -v ufw >/dev/null 2>&1; then ufw delete allow $port/$proto 2>/dev/null; fi
     if command -v firewall-cmd >/dev/null 2>&1; then
-        firewall-cmd --zone=public --remove-port=$port/$proto --permanent
-        firewall-cmd --reload
+        firewall-cmd --zone=public --remove-port=$port/$proto --permanent 2>/dev/null
+        firewall-cmd --reload 2>/dev/null
     fi
     save_iptables
 }
@@ -391,13 +394,14 @@ inst_port() {
         done
         green " 已开启端口跳跃范围: $firstport - $endport"
 
-        modprobe ip6table_nat
-        iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop"
-        ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop"
-        if command -v ufw >/dev/null 2>&1; then ufw allow $firstport:$endport/udp; fi
+        # 修复某些内核不存在 IPv6 NAT 模块时的报错中断
+        modprobe ip6table_nat 2>/dev/null || true
+        iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop" 2>/dev/null
+        ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop" 2>/dev/null
+        if command -v ufw >/dev/null 2>&1; then ufw allow $firstport:$endport/udp 2>/dev/null; fi
         if command -v firewall-cmd >/dev/null 2>&1; then
-            firewall-cmd --zone=public --add-port=$firstport-$endport/udp --permanent
-            firewall-cmd --reload
+            firewall-cmd --zone=public --add-port=$firstport-$endport/udp --permanent 2>/dev/null
+            firewall-cmd --reload 2>/dev/null
         fi
         save_iptables
     fi
@@ -521,22 +525,22 @@ clean_env() {
 
     # 暴露跳跃端口清理日志
     iptables-save -t nat 2>/dev/null | grep "hy2-port-hop" | sed 's/^-A /-D /' | while read -r rule; do
-        eval iptables -t nat $rule
+        eval iptables -t nat $rule 2>/dev/null
     done
     ip6tables-save -t nat 2>/dev/null | grep "hy2-port-hop" | sed 's/^-A /-D /' | while read -r rule; do
-        eval ip6tables -t nat $rule
+        eval ip6tables -t nat $rule 2>/dev/null
     done
 
     # 暴露服务停止日志
-    svc_stop hysteria-server; svc_disable hysteria-server
-    svc_stop hysteria-sub; svc_disable hysteria-sub
+    svc_stop hysteria-server 2>/dev/null; svc_disable hysteria-server 2>/dev/null
+    svc_stop hysteria-sub 2>/dev/null; svc_disable hysteria-sub 2>/dev/null
 
     # 删除系统服务文件
     if [[ $SYSTEM == "Alpine" ]]; then
         rm -f /etc/init.d/hysteria-server /etc/init.d/hysteria-sub
     else
         rm -f /etc/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-sub.service
-        systemctl daemon-reload
+        systemctl daemon-reload 2>/dev/null
     fi
     save_iptables
 
@@ -606,7 +610,9 @@ generate_client_configs() {
 
     local yaml_json_ip="$ip"
     local uri_ip="$ip"
-    if [[ -n $(echo "$ip" | grep ":") ]]; then
+    
+    # 修复更原生的 IPv6 判断
+    if [[ "$ip" == *":"* ]]; then
         uri_ip="[$ip]"
     fi
 
@@ -666,10 +672,13 @@ EOF
     local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null)
     local sub_cert_dir="$web_dir/certs"
     mkdir -p "$sub_cert_dir"
-    cp "$cert_path" "$sub_cert_dir/cert.crt" 2>/dev/null || cp /etc/hysteria/cert.crt "$sub_cert_dir/cert.crt"
-    cp "$key_path" "$sub_cert_dir/private.key" 2>/dev/null || cp /etc/hysteria/private.key "$sub_cert_dir/private.key"
+    
+    # 修复软链接穿透问题 (加上 -L 解引用)
+    cp -L "$cert_path" "$sub_cert_dir/cert.crt" 2>/dev/null || cp -L /etc/hysteria/cert.crt "$sub_cert_dir/cert.crt" 2>/dev/null
+    cp -L "$key_path" "$sub_cert_dir/private.key" 2>/dev/null || cp -L /etc/hysteria/private.key "$sub_cert_dir/private.key" 2>/dev/null
+    
     chown -R nobody "$sub_cert_dir"
-    chmod 400 "$sub_cert_dir/private.key"
+    chmod 400 "$sub_cert_dir/private.key" 2>/dev/null
     
     cat << EOF > "$web_dir/server.py"
 import http.server
@@ -763,7 +772,7 @@ EOF
         systemctl enable hysteria-sub
     fi
     
-    svc_stop hysteria-sub
+    svc_stop hysteria-sub 2>/dev/null
     svc_start hysteria-sub
 }
 
@@ -885,11 +894,14 @@ masquerade:
 trafficStats:
   listen: 127.0.0.1:$api_port
 EOF
+    
+    # 修复配置文件的安全权限问题
+    chmod 600 /etc/hysteria/config.yaml
 
     local last_port=$port
     [[ -n $firstport ]] && last_port="$port,$firstport-$endport"
     local last_ip=$ip
-    [[ -n $(echo "$ip" | grep ":") ]] && last_ip="[$ip]"
+    [[ "$ip" == *":"* ]] && last_ip="[$ip]"
 
     cat << EOF > /etc/hysteria/hy-client.yaml
 server: $last_ip:$last_port
@@ -947,7 +959,7 @@ showconf() {
     [[ "$is_insecure" == "1" && -z "$pin_hash" ]] && protocol="http"
     
     local sub_url=""
-    if [[ -n $(echo "$sub_host" | grep ":") ]]; then
+    if [[ "$sub_host" == *":"* ]]; then
         sub_url="${protocol}://[${sub_host}]:${sub_port}/${sub_path}"
     else
         sub_url="${protocol}://${sub_host}:${sub_port}/${sub_path}"
@@ -1041,10 +1053,25 @@ edit_config() {
             red "  未找到 nano 或 vi 编辑器，请手动修改 /etc/hysteria/config.yaml"
         fi
         
-        green "  配置修改完成，正在重启 Hysteria 2 服务..."
+        green "  正在重启 Hysteria 2 服务验证配置..."
         svc_stop hysteria-server
         svc_start hysteria-server
-        green "  重启成功！新配置已生效。"
+        sleep 1
+        
+        # 修复无状态检测直接报成功的 Bug
+        if [[ $SYSTEM == "Alpine" ]]; then
+            if rc-service hysteria-server status | grep -q 'started'; then
+                green "  重启成功！新配置已生效。"
+            else
+                red "  [错误] 服务重启失败！请重新检查 yaml 文件的缩进和格式是否正确。"
+            fi
+        else
+            if systemctl is-active --quiet hysteria-server; then
+                green "  重启成功！新配置已生效。"
+            else
+                red "  [错误] 服务启动失败！请重新检查 yaml 文件的缩进和格式是否正确。"
+            fi
+        fi
     fi
     echo ""
     echo -en " ${LIGHT_YELLOW} ▶ 按回车键返回主菜单... ${PLAIN}"
@@ -1082,7 +1109,8 @@ EOF
         [[ -z "$api_port" ]] && api_port=$(cat /etc/hysteria/api_port.txt 2>/dev/null)
     fi
 
-    local traffic_data=$(curl -s "http://127.0.0.1:$api_port/traffic")
+    # 修复因为目标没响应导致脚本卡死的问题，增加最大时长超时限制
+    local traffic_data=$(curl -s --max-time 3 "http://127.0.0.1:$api_port/traffic")
     
     clear
     echo ""
@@ -1092,9 +1120,8 @@ EOF
     echo ""
     
     if [[ -z "$traffic_data" || "$traffic_data" =~ "404" ]]; then
-        red "  获取数据失败，Hysteria 服务可能未正常运行。"
+        red "  获取数据失败，Hysteria 服务可能未正常运行，或 API 端口超时。"
     else
-        # 优化 Python JSON 解析容错，改用环境变量传入数据防止引号截断崩溃
         export TRAFFIC_JSON_DATA="$traffic_data"
         python3 -c "
 import os, json
@@ -1176,13 +1203,14 @@ enable_bbr() {
         fi
     fi
     
-    sed -i '/^net\.core\.default_qdisc/d' /etc/sysctl.conf
-    sed -i '/^net\.ipv4\.tcp_congestion_control/d' /etc/sysctl.conf
-    sed -i '/^net\.core\.rmem_max/d' /etc/sysctl.conf
-    sed -i '/^net\.core\.rmem_default/d' /etc/sysctl.conf
-    sed -i '/^net\.core\.wmem_max/d' /etc/sysctl.conf
-    sed -i '/^net\.core\.wmem_default/d' /etc/sysctl.conf
-    sed -i '/^net\.ipv4\.udp_mem/d' /etc/sysctl.conf
+    # 修复 sysctl 配置文件匹配不到含空格的键值对导致报错的 Bug
+    sed -i '/^[[:space:]]*net\.core\.default_qdisc/d' /etc/sysctl.conf
+    sed -i '/^[[:space:]]*net\.ipv4\.tcp_congestion_control/d' /etc/sysctl.conf
+    sed -i '/^[[:space:]]*net\.core\.rmem_max/d' /etc/sysctl.conf
+    sed -i '/^[[:space:]]*net\.core\.rmem_default/d' /etc/sysctl.conf
+    sed -i '/^[[:space:]]*net\.core\.wmem_max/d' /etc/sysctl.conf
+    sed -i '/^[[:space:]]*net\.core\.wmem_default/d' /etc/sysctl.conf
+    sed -i '/^[[:space:]]*net\.ipv4\.udp_mem/d' /etc/sysctl.conf
 
     echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
     echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
