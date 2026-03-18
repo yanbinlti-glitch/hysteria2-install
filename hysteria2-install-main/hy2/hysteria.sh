@@ -836,8 +836,8 @@ insthysteria() {
         *) red " [错误] 不支持的架构: $arch" && exit 1 ;;
     esac
     
-    wget -N -v -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}" || \
-    wget -N -v -O /usr/local/bin/hysteria "https://mirror.ghproxy.com/https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}"
+    wget -N -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}" || \
+    wget -N -O /usr/local/bin/hysteria "https://mirror.ghproxy.com/https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}"
     
     if [[ ! -s /usr/local/bin/hysteria ]]; then
         red " [错误] Hysteria 2 核心下载失败或文件损坏，请根据上方输出排查网络！"
@@ -1431,7 +1431,11 @@ check_cert() {
             fi
 
             # 密码学验证：检查 Cert 和 Key 是否成对
+            local is_mismatch=0
+            local cert_type="ECC"
+            
             if openssl x509 -noout -modulus -in "$cert_path" 2>/dev/null | grep -q "Modulus"; then
+                cert_type="RSA"
                 # RSA 算法验证
                 local cert_mod=$(openssl x509 -noout -modulus -in "$cert_path" 2>/dev/null | tr -d '\r\n ')
                 local key_mod=$(openssl rsa -noout -modulus -in "$key_path" 2>/dev/null | tr -d '\r\n ')
@@ -1440,8 +1444,10 @@ check_cert() {
                 else
                     red "  ▶ 证书与私钥匹配  : [✘] 不匹配！"
                     yellow "  ▶ 报错原因        : 现在的私钥解不开当前的公钥！可能是手动替换文件时只换了其中一个，或者生成时发生了错乱。"
+                    is_mismatch=1
                 fi
             else
+                cert_type="ECC"
                 # ECC 算法验证 (修复换行符与格式兼容性导致的误报)
                 local cert_pub=$(openssl x509 -in "$cert_path" -pubkey -noout 2>/dev/null | grep -v -- "-----" | tr -d '\r\n ')
                 local key_pub=$(openssl pkey -in "$key_path" -pubout 2>/dev/null | grep -v -- "-----" | tr -d '\r\n ')
@@ -1456,8 +1462,53 @@ check_cert() {
                 else
                     red "  ▶ 证书与私钥匹配  : [✘] 不匹配！"
                     yellow "  ▶ 报错原因        : ECC 公钥指纹与私钥不对应。必须保证 crt 和 key 是同一批次生成的。"
+                    is_mismatch=1
                 fi
             fi
+
+            # ====== 新增：智能一键修复逻辑 ======
+            if [[ $is_mismatch -eq 1 && -f "/root/.acme.sh/acme.sh" ]]; then
+                echo ""
+                print_line
+                yellow "  检测到证书不匹配！是否尝试使用 Acme.sh 本地缓存自动修复？"
+                echo -en " ${LIGHT_YELLOW} ▶ 请输入 (y/n) [默认: y]: ${PLAIN}"
+                read try_repair
+                [[ -z "$try_repair" ]] && try_repair="y"
+                
+                if [[ "$try_repair" == "y" || "$try_repair" == "Y" ]]; then
+                    echo ""
+                    green "  正在执行自动修复并重新提取证书..."
+                    local acme_ecc_param=""
+                    [[ "$cert_type" == "ECC" ]] && acme_ecc_param="--ecc"
+                    
+                    bash /root/.acme.sh/acme.sh --install-cert -d "$cert_subject" $acme_ecc_param \
+                        --key-file /root/private.key \
+                        --fullchain-file /root/cert.crt
+                    
+                    if [[ $? -eq 0 ]]; then
+                        chmod 644 /root/cert.crt
+                        chmod 600 /root/private.key
+                        mkdir -p /var/www/hysteria/certs
+                        cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt
+                        cp -f /root/private.key /var/www/hysteria/certs/private.key
+                        chown -R nobody /var/www/hysteria/certs
+                        
+                        if [[ $SYSTEM == "Alpine" ]]; then
+                            rc-service hysteria-server restart 2>/dev/null
+                            rc-service hysteria-sub restart 2>/dev/null
+                        else
+                            systemctl restart hysteria-server 2>/dev/null
+                            systemctl restart hysteria-sub 2>/dev/null
+                        fi
+                        echo ""
+                        green "  [✔] 修复完成！核心服务与订阅服务已自动同步并重启。"
+                    else
+                        echo ""
+                        red "  [✘] 修复失败！Acme.sh 目录中可能没有该域名 ($cert_subject) 的有效缓存。"
+                    fi
+                fi
+            fi
+            # ====================================
 
             # 模式提示与 Acme 自检
             if [[ "$cert_subject" == "www.bing.com" || "$cert_issuer" =~ "bing.com" ]]; then
