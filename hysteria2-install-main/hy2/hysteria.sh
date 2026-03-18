@@ -223,10 +223,17 @@ inst_cert() {
             [[ -z $domain ]] && red " 未输入域名，无法执行操作！" && exit 1
             green " 已记录域名：$domain"
             
-            # 兼容 IPv4 和 IPv6 解析
-            domainIP=$(python3 -c "import socket; print(socket.getaddrinfo('${domain}', None)[0][4][0])" 2>/dev/null)
+            # 兼容 IPv4 和 IPv6 解析，并增加容错处理
+            domainIP=$(python3 -c "import socket; print(socket.getaddrinfo('${domain}', None)[0][4][0])" 2>/dev/null || echo "")
             
-            if [[ "$domainIP" != "$ip" ]]; then
+            if [[ -z "$domainIP" ]]; then
+                echo ""
+                yellow " [警告] 无法解析域名 ${domain} 的 IP 地址！请确认域名已正确解析。"
+                echo -en " ${LIGHT_YELLOW} ▶ 是否强制继续？(y/n) [默认: y]: ${PLAIN}"
+                read force_cert
+                [[ -z $force_cert ]] && force_cert="y"
+                [[ $force_cert != "y" && $force_cert != "Y" ]] && exit 1
+            elif [[ "$domainIP" != "$ip" ]]; then
                 echo ""
                 yellow " [警告] 域名解析的 IP ($domainIP) 与当前真实 IP ($ip) 不匹配！"
                 yellow " [警告] Hysteria 2 必须使用真实 IP 直连，请确保 Cloudflare 已关闭小云朵 (DNS Only)。"
@@ -269,9 +276,12 @@ inst_cert() {
             yellow " 正在通过 DNS API 验证所有权，请留意下方执行日志 (约1-3分钟)..."
             bash /root/.acme.sh/acme.sh --issue --dns dns_cf -d ${domain} -k ec-256
             
-            # 重启命令加入复制证书逻辑，确保 Python 订阅服务端同步更新
-            local reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && systemctl restart hysteria-server && systemctl restart hysteria-sub"
-            [[ $SYSTEM == "Alpine" ]] && reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && rc-service hysteria-server restart && rc-service hysteria-sub restart"
+            # 提前创建目录，防止 cp 报错
+            mkdir -p /var/www/hysteria/certs
+
+            # 重启命令加入复制证书逻辑和修正权限，确保 Python 订阅服务端同步更新
+            local reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && chown -R nobody /var/www/hysteria/certs && systemctl restart hysteria-server && systemctl restart hysteria-sub"
+            [[ $SYSTEM == "Alpine" ]] && reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && chown -R nobody /var/www/hysteria/certs && rc-service hysteria-server restart && rc-service hysteria-sub restart"
             
             bash /root/.acme.sh/acme.sh --install-cert -d ${domain} --key-file /root/private.key --fullchain-file /root/cert.crt --ecc --reloadcmd "$reload_cmd"
             
@@ -732,11 +742,9 @@ insthysteria() {
         *) red " 不支持的架构: $arch" && exit 1 ;;
     esac
     
-    hy_ver=$(curl -sI "https://github.com/apernet/hysteria/releases/latest" | grep -i "^location:" | sed 's/.*\/tag\///g' | tr -d '\r\n')
-    hy_ver=${hy_ver//%2F//}
-    [[ -z $hy_ver ]] && hy_ver="app/v2.4.0"
-    
-    wget -N -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/download/${hy_ver}/hysteria-linux-${hy_arch}"
+    # 移除通过 curl 抓取 hy_ver 的繁琐步骤
+    # 直接使用官方提供的 latest 下载链接
+    wget -N -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}"
     if [[ $? -ne 0 ]]; then
         red " Hysteria 2 核心下载失败，请根据上方输出排查网络！"
         exit 1
@@ -1097,7 +1105,11 @@ enable_bbr() {
         sleep 3; return
     fi
 
-    modprobe tcp_bbr || true
+    # 尝试加载模块并检测是否成功 (修复 LXC 报错满屏的问题)
+    if ! modprobe tcp_bbr 2>/dev/null; then
+        red "  [错误] 当前系统/内核 (可能是 LXC 容器) 不支持加载 BBR 模块！"
+        sleep 3; return
+    fi
     
     sed -i '/^net\.core\.default_qdisc/d' /etc/sysctl.conf
     sed -i '/^net\.ipv4\.tcp_congestion_control/d' /etc/sysctl.conf
