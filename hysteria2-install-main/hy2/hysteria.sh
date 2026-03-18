@@ -836,7 +836,6 @@ insthysteria() {
         *) red " [错误] 不支持的架构: $arch" && exit 1 ;;
     esac
     
-    wget --timeout=10 --tries=3 -N -v -O /usr/local/bin/hysteria "https://mirror.ghproxy.com/https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}" || \
     wget --timeout=10 --tries=3 -N -v -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}"
     
     if [[ ! -s /usr/local/bin/hysteria ]]; then
