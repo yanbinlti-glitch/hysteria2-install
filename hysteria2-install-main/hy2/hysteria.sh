@@ -223,22 +223,23 @@ inst_cert() {
     echo ""
     echo -en " ${LIGHT_YELLOW} ▶ 请输入选项 [1-3] (默认1): ${PLAIN}"
     read certInput
-    [[ -z $certInput ]] && certInput=1
+    [[ -z "$certInput" ]] && certInput=1
 
-    if [[ $certInput == 2 ]]; then
+    if [[ "$certInput" == 2 ]]; then
         cert_path="/root/cert.crt"
         key_path="/root/private.key"
         if [[ -f /root/cert.crt && -f /root/private.key && -f /root/ca.log ]]; then
-            domain=$(cat /root/ca.log)
+            domain=$(cat /root/ca.log 2>/dev/null | tr -d '\r')
             echo ""
             green " 检测到原有域名：$domain 的证书，正在直接应用..."
-            hy_domain=$domain
+            hy_domain="$domain"
         else
             realip
             echo ""
             echo -en " ${LIGHT_YELLOW} ▶ 请输入需要申请证书的域名: ${PLAIN}"
             read domain
-            [[ -z $domain ]] && red " 未输入域名，无法执行操作！" && exit 1
+            [[ -z "$domain" ]] && red " 未输入域名，无法执行操作！" && exit 1
+            domain=$(echo "$domain" | tr -d '\r' | tr -d ' ')
             green " 已记录域名：$domain"
             
             domainIP=$(python3 -c "import socket; print(socket.getaddrinfo('${domain}', None)[0][4][0])" 2>/dev/null || echo "")
@@ -248,16 +249,16 @@ inst_cert() {
                 yellow " [警告] 无法解析域名 ${domain} 的 IP 地址！请确认域名已正确解析。"
                 echo -en " ${LIGHT_YELLOW} ▶ 是否强制继续？(y/n) [默认: y]: ${PLAIN}"
                 read force_cert
-                [[ -z $force_cert ]] && force_cert="y"
-                [[ $force_cert != "y" && $force_cert != "Y" ]] && exit 1
+                [[ -z "$force_cert" ]] && force_cert="y"
+                [[ "$force_cert" != "y" && "$force_cert" != "Y" ]] && exit 1
             elif [[ "$domainIP" != "$ip" ]]; then
                 echo ""
                 yellow " [警告] 域名解析的 IP ($domainIP) 与当前真实 IP ($ip) 不匹配！"
                 yellow " [警告] Hysteria 2 必须使用真实 IP 直连，请确保 Cloudflare 已关闭小云朵 (DNS Only)。"
                 echo -en " ${LIGHT_YELLOW} ▶ 是否确认并继续？(y/n) [默认: y]: ${PLAIN}"
                 read force_cert
-                [[ -z $force_cert ]] && force_cert="y"
-                [[ $force_cert != "y" && $force_cert != "Y" ]] && exit 1
+                [[ -z "$force_cert" ]] && force_cert="y"
+                [[ "$force_cert" != "y" && "$force_cert" != "Y" ]] && exit 1
             fi
 
             echo ""
@@ -267,27 +268,38 @@ inst_cert() {
             echo ""
             echo -en " ${LIGHT_YELLOW} ▶ 选择认证方式 [1. API Token(推荐) | 2. Global API Key]: ${PLAIN}"
             read cf_auth_choice
-            [[ -z $cf_auth_choice ]] && cf_auth_choice=1
+            [[ -z "$cf_auth_choice" ]] && cf_auth_choice=1
 
-            if [[ $cf_auth_choice == 1 ]]; then
+            install_acme() {
+                local acme_email="$1"
+                if [[ ! -f "/root/.acme.sh/acme.sh" ]]; then
+                    yellow "  正在安全拉取 Acme.sh 安装脚本..."
+                    curl -sL --max-time 30 -o /tmp/acme_install.sh https://get.acme.sh
+                    if [[ $? -ne 0 || ! -s /tmp/acme_install.sh ]]; then
+                        red "  [错误] Acme.sh 下载失败！请检查网络连接或更换 DNS。"
+                        rm -f /tmp/acme_install.sh
+                        exit 1
+                    fi
+                    sh /tmp/acme_install.sh email="$acme_email" || { red "  [错误] Acme.sh 安装过程报错！"; rm -f /tmp/acme_install.sh; exit 1; }
+                    rm -f /tmp/acme_install.sh
+                fi
+            }
+
+            if [[ "$cf_auth_choice" == 1 ]]; then
                 echo -en " ${LIGHT_YELLOW} ▶ 请输入 Cloudflare API Token: ${PLAIN}"
                 read cf_token
-                [[ -z $cf_token ]] && red " Token 不能为空！" && exit 1
-                export CF_Token="$cf_token"
-                if [[ ! -f "/root/.acme.sh/acme.sh" ]]; then
-                    curl https://get.acme.sh | sh -s email="admin@${domain}" || { echo ""; red " [错误] Acme.sh 脚本下载失败！"; exit 1; }
-                fi
+                [[ -z "$cf_token" ]] && red " Token 不能为空！" && exit 1
+                export CF_Token="$(echo "$cf_token" | tr -d '\r' | tr -d ' ')"
+                install_acme "admin@${domain}"
             else
                 echo -en " ${LIGHT_YELLOW} ▶ 请输入 Cloudflare 账号邮箱: ${PLAIN}"
                 read cf_email
                 echo -en " ${LIGHT_YELLOW} ▶ 请输入 Cloudflare Global API Key: ${PLAIN}"
                 read cf_key
-                [[ -z $cf_email || -z $cf_key ]] && red " 邮箱或 Key 不能为空！" && exit 1
-                export CF_Email="$cf_email"
-                export CF_Key="$cf_key"
-                if [[ ! -f "/root/.acme.sh/acme.sh" ]]; then
-                    curl https://get.acme.sh | sh -s email="$cf_email" || { echo ""; red " [错误] Acme.sh 脚本下载失败！"; exit 1; }
-                fi
+                [[ -z "$cf_email" || -z "$cf_key" ]] && red " 邮箱或 Key 不能为空！" && exit 1
+                export CF_Email="$(echo "$cf_email" | tr -d '\r' | tr -d ' ')"
+                export CF_Key="$(echo "$cf_key" | tr -d '\r' | tr -d ' ')"
+                install_acme "$CF_Email"
             fi
             
             bash /root/.acme.sh/acme.sh --upgrade --auto-upgrade
@@ -295,7 +307,7 @@ inst_cert() {
             rm -f /root/cert.crt /root/private.key /root/ca.log
 
             yellow " 正在通过 DNS API 验证所有权，请留意下方执行日志 (约1-3分钟)..."
-            bash /root/.acme.sh/acme.sh --issue --dns dns_cf -d ${domain} -k ec-256
+            bash /root/.acme.sh/acme.sh --issue --dns dns_cf -d "${domain}" -k ec-256
             mkdir -p /var/www/hysteria/certs
 
             if [[ $SYSTEM == "Alpine" ]]; then
@@ -304,36 +316,39 @@ inst_cert() {
                 local reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && chown -R nobody /var/www/hysteria/certs && if systemctl is-active --quiet hysteria-server; then systemctl restart hysteria-server; fi && if systemctl is-active --quiet hysteria-sub; then systemctl restart hysteria-sub; fi"
             fi
             
-            bash /root/.acme.sh/acme.sh --install-cert -d ${domain} --key-file /root/private.key --fullchain-file /root/cert.crt --ecc --reloadcmd "$reload_cmd"
+            bash /root/.acme.sh/acme.sh --install-cert -d "${domain}" --key-file /root/private.key --fullchain-file /root/cert.crt --ecc --reloadcmd "$reload_cmd"
             
             if [[ -f /root/cert.crt && -f /root/private.key ]]; then
-                echo $domain > /root/ca.log
+                echo "$domain" > /root/ca.log
                 chmod 644 /root/cert.crt; chmod 600 /root/private.key
                 green " 证书申请成功！已保存至 /root/ 目录下。"
-                hy_domain=$domain
+                hy_domain="$domain"
             else
                 red " [错误] 证书申请失败！请向上翻阅执行日志检查具体报错信息。"
                 exit 1
             fi
         fi
-    elif [[ $certInput == 3 ]]; then
+    elif [[ "$certInput" == 3 ]]; then
         echo ""
         while true; do
             echo -en " ${LIGHT_YELLOW} ▶ 请输入公钥(crt)的绝对路径: ${PLAIN}"
             read cert_path
+            cert_path=$(echo "$cert_path" | tr -d '\r' | tr -d ' ')
             if [[ -f "$cert_path" ]]; then break; else red " [错误] 文件不存在，请重新输入！"; fi
         done
         while true; do
             echo -en " ${LIGHT_YELLOW} ▶ 请输入密钥(key)的绝对路径: ${PLAIN}"
             read key_path
+            key_path=$(echo "$key_path" | tr -d '\r' | tr -d ' ')
             if [[ -f "$key_path" ]]; then break; else red " [错误] 文件不存在，请重新输入！"; fi
         done
         while true; do
             echo -en " ${LIGHT_YELLOW} ▶ 请输入对应的域名: ${PLAIN}"
             read domain
+            domain=$(echo "$domain" | tr -d '\r' | tr -d ' ')
             if [[ -n "$domain" ]]; then break; else red " [错误] 域名不能为空！"; fi
         done
-        hy_domain=$domain
+        hy_domain="$domain"
     else
         echo ""
         green " 已选择 必应(Bing)自签伪装证书，开始生成密钥与证书..."
@@ -341,8 +356,8 @@ inst_cert() {
         cert_path="/etc/hysteria/cert.crt"
         key_path="/etc/hysteria/private.key"
         
-        openssl ecparam -genkey -name prime256v1 -out /etc/hysteria/private.key
-        openssl req -new -x509 -days 36500 -key /etc/hysteria/private.key -out /etc/hysteria/cert.crt -subj "/CN=www.bing.com"
+        openssl ecparam -genkey -name prime256v1 -out /etc/hysteria/private.key 2>/dev/null
+        openssl req -new -x509 -days 36500 -key /etc/hysteria/private.key -out /etc/hysteria/cert.crt -subj "/CN=www.bing.com" 2>/dev/null
         chmod 644 /etc/hysteria/cert.crt; chmod 600 /etc/hysteria/private.key
 
         hy_domain="www.bing.com"
@@ -521,29 +536,35 @@ inst_other_configs() {
 #  6. 核心业务处理与部署逻辑
 # =================================================================
 clean_env() {
-    local mode=$1
+    local mode="$1"
     
-    local main_port=$(grep '^listen:' /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ')
-    local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null)
+    local main_port=$(grep -E "^[[:space:]]*listen:" /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ' | tr -d '\r')
+    local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null | tr -d '\r')
 
-    [[ -n "$main_port" && "$main_port" =~ ^[0-9]+$ ]] && close_port $main_port "udp"
-    [[ -n "$sub_port" && "$sub_port" =~ ^[0-9]+$ ]] && close_port $sub_port "tcp"
+    [[ -n "$main_port" && "$main_port" =~ ^[0-9]+$ ]] && close_port "$main_port" "udp"
+    [[ -n "$sub_port" && "$sub_port" =~ ^[0-9]+$ ]] && close_port "$sub_port" "tcp"
 
-    iptables-save -t nat 2>/dev/null | grep "hy2-port-hop" | sed 's/^-A /-D /' | while read -r rule; do
-        eval iptables -t nat $rule 2>/dev/null
-    done
-    ip6tables-save -t nat 2>/dev/null | grep "hy2-port-hop" | sed 's/^-A /-D /' | while read -r rule; do
-        eval ip6tables -t nat $rule 2>/dev/null
-    done
+    if command -v iptables >/dev/null 2>&1; then
+        iptables -t nat -nL PREROUTING --line-numbers 2>/dev/null | grep "hy2-port-hop" | awk '{print $1}' | sort -nr | while read -r num; do
+            iptables -t nat -D PREROUTING "$num" 2>/dev/null
+        done
+    fi
+    if command -v ip6tables >/dev/null 2>&1; then
+        ip6tables -t nat -nL PREROUTING --line-numbers 2>/dev/null | grep "hy2-port-hop" | awk '{print $1}' | sort -nr | while read -r num; do
+            ip6tables -t nat -D PREROUTING "$num" 2>/dev/null
+        done
+    fi
 
     if [[ -f /etc/hysteria/port_hop.txt ]]; then
-        local hop_range=$(cat /etc/hysteria/port_hop.txt)
-        local f_port=$(echo $hop_range | cut -d':' -f1)
-        local e_port=$(echo $hop_range | cut -d':' -f2)
-        if command -v ufw >/dev/null 2>&1; then ufw delete allow $f_port:$e_port/udp 2>/dev/null; fi
-        if command -v firewall-cmd >/dev/null 2>&1; then
-            firewall-cmd --zone=public --remove-port=$f_port-$e_port/udp --permanent 2>/dev/null
-            firewall-cmd --reload 2>/dev/null
+        local hop_range=$(cat /etc/hysteria/port_hop.txt 2>/dev/null | tr -d '\r')
+        local f_port=$(echo "$hop_range" | cut -d':' -f1)
+        local e_port=$(echo "$hop_range" | cut -d':' -f2)
+        if [[ -n "$f_port" && -n "$e_port" ]]; then
+            if command -v ufw >/dev/null 2>&1; then ufw delete allow "$f_port:$e_port/udp" 2>/dev/null; fi
+            if command -v firewall-cmd >/dev/null 2>&1; then
+                firewall-cmd --zone=public --remove-port="$f_port-$e_port/udp" --permanent 2>/dev/null
+                firewall-cmd --reload 2>/dev/null
+            fi
         fi
     else
         echo ""
@@ -974,7 +995,7 @@ showconf() {
     local sub_path=$(cat /etc/hysteria/sub_path.txt 2>/dev/null)
     local sub_host=$(cat /etc/hysteria/sub_host.txt 2>/dev/null)
     local is_insecure=$(cat /etc/hysteria/insecure_state.txt 2>/dev/null)
-    local main_port=$(grep '^listen:' /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ')
+    local main_port=$(grep -E "^[[:space:]]*listen:" /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ' | tr -d '\r')
     local hop_ports=$(grep '^server:' /etc/hysteria/hy-client.yaml 2>/dev/null | awk -F ',' '{print $2}')
     
     [[ -z "$sub_host" || "$sub_host" == "" ]] && sub_host=$ip
@@ -1111,7 +1132,7 @@ check_traffic() {
         sleep 2; return
     fi
     
-    if ! grep -q "^trafficStats:" /etc/hysteria/config.yaml; then
+    if ! grep -q -E "^[[:space:]]*trafficStats:" /etc/hysteria/config.yaml; then
         local api_port=$(shuf -i 30000-60000 -n 1)
         while ss -tnl | grep -E -q ":$api_port( |$)"; do api_port=$(shuf -i 30000-60000 -n 1); done
         echo "$api_port" > /etc/hysteria/api_port.txt
@@ -1132,7 +1153,7 @@ EOF
         read temp
         return
     else
-        local api_port=$(grep 'listen: 127.0.0.1:' /etc/hysteria/config.yaml | grep -oE '[0-9]+$')
+        local api_port=$(grep -E "^[[:space:]]*listen: 127\.0\.0\.1:" /etc/hysteria/config.yaml | head -n 1 | grep -oE '[0-9]+' | tail -n 1)
         [[ -z "$api_port" ]] && api_port=$(cat /etc/hysteria/api_port.txt 2>/dev/null)
     fi
 
@@ -1164,7 +1185,7 @@ try:
         for user, stats in data.items():
             tx_mb = stats.get('tx', 0) / 1048576
             rx_mb = stats.get('rx', 0) / 1048576
-            print(f'\033[33m  账号: {user} | 发送: {tx_mb:.2f} MB | 接收: {rx_mb:.2f} MB\033[0m')
+            print('\033[33m  账号: {} | 发送: {:.2f} MB | 接收: {:.2f} MB\033[0m'.format(user, tx_mb, rx_mb))
 except ValueError:
     print('\033[31m  [错误] Hysteria 流量 API 返回了非 JSON 数据，服务可能处于异常状态。\033[0m')
 except Exception as e:
