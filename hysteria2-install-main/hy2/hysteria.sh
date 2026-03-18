@@ -144,7 +144,11 @@ check_env() {
 }
 
 realip(){
-    ip=$(curl -s4m8 ip.sb -k || curl -s4m8 ifconfig.me -k) || ip=$(curl -s6m8 ip.sb -k || curl -s6m8 ifconfig.me -k)
+    # 强化获取 IP 的稳定性，防止抓取到报错的 HTML 代码，并加上 head -n 1 防止多行污染
+    ip=$(curl -s4m8 ip.sb -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1 || curl -s4m8 ifconfig.me -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1)
+    if [[ -z "$ip" ]]; then
+        ip=$(curl -s6m8 ip.sb -k || curl -s6m8 ifconfig.me -k)
+    fi
 }
 
 inst_cert(){
@@ -204,13 +208,19 @@ inst_cert(){
             green "正在通过 Cloudflare DNS API 验证域名所有权，这可能需要 1-3 分钟，请耐心等待..."
             bash ~/.acme.sh/acme.sh --issue --dns dns_cf -d ${domain} -k ec-256
             
-            bash ~/.acme.sh/acme.sh --install-cert -d ${domain} --key-file /root/private.key --fullchain-file /root/cert.crt --ecc
+            # 根据不同系统定义续签后的重载命令
+            if [[ $SYSTEM == "Alpine" ]]; then
+                reload_cmd="rc-service hysteria-server restart"
+            else
+                reload_cmd="systemctl restart hysteria-server"
+            fi
+            
+            # 增加 --reloadcmd 确保续签后自动重启服务加载新证书
+            bash ~/.acme.sh/acme.sh --install-cert -d ${domain} --key-file /root/private.key --fullchain-file /root/cert.crt --ecc --reloadcmd "$reload_cmd"
             
             if [[ -f /root/cert.crt && -f /root/private.key ]]; then
                 echo $domain > /root/ca.log
-                sed -i '/--cron/d' /etc/crontab
-                echo "0 0 * * * root bash /root/.acme.sh/acme.sh --cron -f >/dev/null 2>&1" >> /etc/crontab
-                
+                # acme.sh 安装时已自动配置用户级 cron，无需重复画蛇添足
                 chmod 644 /root/cert.crt
                 chmod 600 /root/private.key
                 
@@ -245,11 +255,24 @@ inst_cert(){
 inst_port(){
     read -p "设置 Hysteria 2 节点端口 [1-65535]（回车随机）：" port
     [[ -z $port ]] && port=$(shuf -i 2000-65535 -n 1)
+    
+    # 强制校验是否为纯数字
+    while [[ ! "$port" =~ ^[0-9]+$ ]]; do
+        red "⚠️ 端口必须是纯数字！"
+        read -p "请重新设置 Hysteria 2 节点端口 [1-65535]（回车随机）：" port
+        [[ -z $port ]] && port=$(shuf -i 2000-65535 -n 1)
+    done
+
     until [[ -z $(ss -tunlp | grep -w udp | awk '{print $5}' | sed 's/.*://g' | grep -w "$port") ]]; do
         if [[ -n $(ss -tunlp | grep -w udp | awk '{print $5}' | sed 's/.*://g' | grep -w "$port") ]]; then
             echo -e "${RED} $port ${PLAIN} 端口已经被占用，请更换端口重试！"
             read -p "设置 Hysteria 2 节点端口 [1-65535]（回车随机）：" port
             [[ -z $port ]] && port=$(shuf -i 2000-65535 -n 1)
+            while [[ ! "$port" =~ ^[0-9]+$ ]]; do
+                red "⚠️ 端口必须是纯数字！"
+                read -p "请重新设置 Hysteria 2 节点端口 [1-65535]（回车随机）：" port
+                [[ -z $port ]] && port=$(shuf -i 2000-65535 -n 1)
+            done
         fi
     done
     yellow "将在 Hysteria 2 节点使用的端口是：$port"
@@ -269,7 +292,17 @@ inst_jump(){
     read -rp "请输入选项 [1-2]: " jumpInput
     if [[ $jumpInput == 2 ]]; then
         read -p "起始端口 (建议10000-65535)：" firstport
+        while [[ ! "$firstport" =~ ^[0-9]+$ ]]; do
+            red "⚠️ 端口必须是纯数字！"
+            read -p "起始端口 (建议10000-65535)：" firstport
+        done
+
         read -p "末尾端口 (一定要比起始大)：" endport
+        while [[ ! "$endport" =~ ^[0-9]+$ || "$endport" -le "$firstport" ]]; do
+            red "⚠️ 端口必须是纯数字，且必须大于起始端口！"
+            read -p "末尾端口 (一定要比起始大)：" endport
+        done
+
         iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport  -j DNAT --to-destination :$port
         ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport  -j DNAT --to-destination :$port
         
@@ -280,6 +313,13 @@ inst_jump(){
 inst_sub_port(){
     read -p "设置 HTTP 订阅服务端口 [1024-65535]（回车则随机分配）：" sub_port_input
     [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 10000-30000 -n 1)
+    
+    # 强制校验是否为纯数字
+    while [[ ! "$sub_port_input" =~ ^[0-9]+$ ]]; do
+        red "⚠️ 端口必须是纯数字！"
+        read -p "请重新设置 HTTP 订阅服务端口 [1024-65535]：" sub_port_input
+        [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 10000-30000 -n 1)
+    done
     
     if [[ "$sub_port_input" -lt 1024 ]]; then
         red "⚠️ 警告：订阅服务为了安全已降级为 nobody 运行，Linux 严禁非 root 用户绑定 1024 以下特权端口！"
@@ -292,6 +332,13 @@ inst_sub_port(){
             echo -e "${RED} $sub_port_input ${PLAIN} 端口已经被占用，请更换端口重试！"
             read -p "设置 HTTP 订阅服务端口 [1024-65535]（回车则随机分配）：" sub_port_input
             [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 10000-30000 -n 1)
+            
+            while [[ ! "$sub_port_input" =~ ^[0-9]+$ ]]; do
+                red "⚠️ 端口必须是纯数字！"
+                read -p "请重新设置 HTTP 订阅服务端口 [1024-65535]：" sub_port_input
+                [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 10000-30000 -n 1)
+            done
+
             if [[ "$sub_port_input" -lt 1024 ]]; then
                 sub_port_input=$(shuf -i 10000-30000 -n 1)
             fi
@@ -320,10 +367,24 @@ inst_bandwidth(){
     echo ""
     green "================ 🚀 节点带宽控制配置 (降低延迟关键) ================"
     yellow "Hysteria 2 推荐配置服务端最大可用带宽，以配合 Brutal 拥塞控制算法防止缓冲膨胀。"
-    read -p "请输入 VPS 的最大上行带宽 (如 500 mbps, 1 gbps，回车默认 1 gbps)：" bw_up
-    [[ -z $bw_up ]] && bw_up="1 gbps"
-    read -p "请输入 VPS 的最大下行带宽 (如 500 mbps, 1 gbps，回车默认 1 gbps)：" bw_down
-    [[ -z $bw_down ]] && bw_down="1 gbps"
+    
+    read -p "请输入 VPS 的最大上行带宽 (单位 Mbps，仅填数字，回车默认 1000)：" bw_up_input
+    [[ -z $bw_up_input ]] && bw_up_input="1000"
+    # 强制校验是否为纯数字
+    while [[ ! "$bw_up_input" =~ ^[0-9]+$ ]]; do
+        red "⚠️ 输入无效，请仅输入纯数字！"
+        read -p "请输入 VPS 的最大上行带宽 (单位 Mbps)：" bw_up_input
+    done
+    bw_up="${bw_up_input} mbps"
+    
+    read -p "请输入 VPS 的最大下行带宽 (单位 Mbps，仅填数字，回车默认 1000)：" bw_down_input
+    [[ -z $bw_down_input ]] && bw_down_input="1000"
+    # 强制校验是否为纯数字
+    while [[ ! "$bw_down_input" =~ ^[0-9]+$ ]]; do
+        red "⚠️ 输入无效，请仅输入纯数字！"
+        read -p "请输入 VPS 的最大下行带宽 (单位 Mbps)：" bw_down_input
+    done
+    bw_down="${bw_down_input} mbps"
 }
 
 inst_obfs(){
@@ -354,8 +415,15 @@ generate_client_configs() {
     local primary_port=$(echo "$c_ports" | cut -d',' -f1)
     local hop_ports=$(echo "$c_ports" | awk -F ',' '{print $2}')
     
-    # 提取服务端混淆密码
+    # 提取服务端混淆密码和证书验证状态
     local s_obfs_pwd=$(awk '/obfs:/{flag=1} flag && /password:/{print $2; flag=0}' /etc/hysteria/config.yaml | tr -d '"' | tr -d "'")
+    local is_insecure_url=$(cat /etc/hysteria/insecure_state.txt 2>/dev/null || echo "1")
+    
+    local clash_cert_verify="true"
+    if [[ "$is_insecure_url" == "0" ]]; then
+        clash_cert_verify="false"
+    fi
+
     local obfs_param=""
     local clash_obfs_block=""
     if [[ -n "$s_obfs_pwd" ]]; then
@@ -384,13 +452,13 @@ generate_client_configs() {
     echo "<h1 style='text-align:center;margin-top:20%;'>403 Forbidden</h1>" > $web_dir/$sub_uuid/index.html
     echo "$sub_uuid" > /etc/hysteria/sub_path.txt
 
-    # 包含混淆参数的 URL 链接
-    local url="hysteria2://$s_pwd@$uri_ip:$primary_port/?insecure=1&sni=$c_domain${mport_param}${obfs_param}#${custom_node_name}"
+    # 包含动态证书验证和混淆参数的 URL 链接
+    local url="hysteria2://$s_pwd@$uri_ip:$primary_port/?insecure=${is_insecure_url}&sni=$c_domain${mport_param}${obfs_param}#${custom_node_name}"
     echo "$url" > $web_dir/$sub_uuid/url.txt
     
     echo -n "$url" | base64 | tr -d '\r\n' > $web_dir/$sub_uuid/sub_b64.txt
 
-    # Clash Meta 订阅文件生成
+    # Clash Meta 订阅文件生成 (动态判断是否需要 skip-cert-verify)
     cat << EOF > $web_dir/$sub_uuid/clash-meta-sub.yaml
 port: 7890
 socks-port: 7891
@@ -407,7 +475,7 @@ proxies:
 $([[ -n "$hop_ports" ]] && echo "    ports: '$hop_ports'")
     password: "$s_pwd"
     sni: "$c_domain"
-    skip-cert-verify: true
+    skip-cert-verify: $clash_cert_verify
     alpn:
       - h3
 $clash_obfs_block
@@ -477,7 +545,10 @@ EOF
 }
 
 showconf(){
-    local ip=$(curl -s4m8 ip.sb -k || curl -s4m8 ifconfig.me -k) || ip=$(curl -s6m8 ip.sb -k || curl -s6m8 ifconfig.me -k)
+    local ip=$(curl -s4m8 ip.sb -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1 || curl -s4m8 ifconfig.me -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1)
+    if [[ -z "$ip" ]]; then
+        ip=$(curl -s6m8 ip.sb -k || curl -s6m8 ifconfig.me -k)
+    fi
     local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null)
     local sub_path=$(cat /etc/hysteria/sub_path.txt 2>/dev/null)
     local web_dir="/var/www/hysteria"
@@ -606,6 +677,8 @@ insthysteria(){
     esac
     
     hy_ver=$(curl -sI "https://github.com/apernet/hysteria/releases/latest" | grep -i "^location:" | sed 's/.*\/tag\///g' | tr -d '\r\n')
+    # 修复 URL 编码导致的 404 问题：将 %2F 替换回 /
+    hy_ver=${hy_ver//%2F//}
     [[ -z $hy_ver ]] && hy_ver="app/v2.4.0"
     
     wget -N -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/download/${hy_ver}/hysteria-linux-${hy_arch}"
@@ -653,6 +726,18 @@ EOF
     inst_node_name
     inst_bandwidth
     inst_obfs
+
+    # 动态判断是否需要跳过证书验证
+    if [[ "$hy_domain" == "www.bing.com" ]]; then
+        cert_insecure_yaml="true"
+        cert_insecure_url="1"
+    else
+        cert_insecure_yaml="false"
+        cert_insecure_url="0"
+    fi
+    
+    # 存入状态供后续生成客户端配置使用
+    echo "$cert_insecure_url" > /etc/hysteria/insecure_state.txt
 
     # 写入优化版服务端配置 (移除 quic 窗口硬编码，加入混淆与带宽控制)
     cat << EOF > /etc/hysteria/config.yaml
@@ -704,7 +789,7 @@ server: $last_ip:$last_port
 auth: $auth_pwd
 tls:
   sni: $hy_domain
-  insecure: true
+  insecure: $cert_insecure_yaml
 EOF
 
     svc_enable hysteria-server
@@ -724,12 +809,13 @@ unsthysteria(){
     local main_port=$(grep '^listen:' /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ')
     local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null)
 
-    if [[ -n $main_port ]]; then
+    # 强化安全判断，避免 $main_port 为空或含有非数字字符时导致 iptables 报错
+    if [[ -n "$main_port" && "$main_port" =~ ^[0-9]+$ ]]; then
         iptables -D INPUT -p udp --dport $main_port -j ACCEPT || true
         ip6tables -D INPUT -p udp --dport $main_port -j ACCEPT || true
         yellow "提示：如果你使用了端口跳跃，建议手动使用 iptables -t nat -F PREROUTING 清理 NAT 规则。"
     fi
-    if [[ -n $sub_port ]]; then
+    if [[ -n "$sub_port" && "$sub_port" =~ ^[0-9]+$ ]]; then
         iptables -D INPUT -p tcp --dport $sub_port -j ACCEPT || true
     fi
 
@@ -764,6 +850,25 @@ stophysteria_only(){
     svc_stop hysteria-server
     svc_stop hysteria-sub
     green "Hysteria 2 及订阅服务已关闭！"
+}
+
+hysteriaswitch(){
+    clear
+    green "================ ⚙️ 服务状态控制 ================"
+    echo -e " ${GREEN}1.${PLAIN} 启动 Hysteria 2 及订阅服务"
+    echo -e " ${RED}2.${PLAIN} 停止 Hysteria 2 及订阅服务"
+    echo -e " ${YELLOW}3.${PLAIN} 重启 Hysteria 2 及订阅服务"
+    echo " ------------------------------------------------"
+    echo -e " 0. 返回主菜单"
+    echo ""
+    read -rp "请输入选项 [0-3]: " switchInput
+    case $switchInput in
+        1 ) starthysteria ;;
+        2 ) stophysteria_only; sleep 2; menu ;;
+        3 ) stophysteria_only; starthysteria ;;
+        0 ) menu ;;
+        * ) red "输入无效，返回主菜单"; sleep 1; menu ;;
+    esac
 }
 
 enable_bbr(){
