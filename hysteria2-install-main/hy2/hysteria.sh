@@ -836,8 +836,8 @@ insthysteria() {
         *) red " [错误] 不支持的架构: $arch" && exit 1 ;;
     esac
     
-    wget -N -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}" || \
-    wget -N -O /usr/local/bin/hysteria "https://mirror.ghproxy.com/https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}"
+    wget -N -v -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}" || \
+    wget -N -v -O /usr/local/bin/hysteria "https://mirror.ghproxy.com/https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}"
     
     if [[ ! -s /usr/local/bin/hysteria ]]; then
         red " [错误] Hysteria 2 核心下载失败或文件损坏，请根据上方输出排查网络！"
@@ -1448,13 +1448,13 @@ check_cert() {
                 fi
             else
                 cert_type="ECC"
-                # ECC 算法验证 (修复换行符与格式兼容性导致的误报)
-                local cert_pub=$(openssl x509 -in "$cert_path" -pubkey -noout 2>/dev/null | grep -v -- "-----" | tr -d '\r\n ')
-                local key_pub=$(openssl pkey -in "$key_path" -pubout 2>/dev/null | grep -v -- "-----" | tr -d '\r\n ')
+                # ECC 算法验证 (彻底修复 Alpine Busybox 环境下文本截断导致的误报)
+                local cert_pub=$(openssl x509 -in "$cert_path" -pubkey -noout 2>/dev/null | sed '/^-----/d' | tr -d '\r\n ')
+                local key_pub=$(openssl pkey -in "$key_path" -pubout 2>/dev/null | sed '/^-----/d' | tr -d '\r\n ')
                 
                 # 兼容部分老系统不支持 pkey 命令，使用 ec 备用提取
                 if [[ -z "$key_pub" ]]; then
-                    key_pub=$(openssl ec -in "$key_path" -pubout 2>/dev/null | grep -v -- "-----" | tr -d '\r\n ')
+                    key_pub=$(openssl ec -in "$key_path" -pubout 2>/dev/null | sed '/^-----/d' | tr -d '\r\n ')
                 fi
 
                 if [[ "$cert_pub" == "$key_pub" && -n "$cert_pub" ]]; then
