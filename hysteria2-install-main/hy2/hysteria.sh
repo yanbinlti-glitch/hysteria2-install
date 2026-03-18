@@ -1,6 +1,7 @@
 #!/bin/bash
 
 export LANG=en_US.UTF-8
+export DEBIAN_FRONTEND=noninteractive
 
 # =================================================================
 #  1. 现代化极简 UI 色彩库 (严格遵循: 绿/红/黄/紫)
@@ -39,7 +40,7 @@ fi
 REGEX=("alpine" "debian" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "'amazon linux'" "fedora")
 RELEASE=("Alpine" "Debian" "Ubuntu" "CentOS" "CentOS" "Fedora")
 PACKAGE_UPDATE=("apk update" "apt-get update" "apt-get update" "yum -y update" "yum -y update" "yum -y update")
-PACKAGE_INSTALL=("apk add" "apt -y install" "apt -y install" "yum -y install" "yum -y install" "yum -y install")
+PACKAGE_INSTALL=("apk add" "apt-get -y install" "apt-get -y install" "yum -y install" "yum -y install" "yum -y install")
 
 CMD=("$(grep -i pretty_name /etc/os-release | cut -d \" -f2)" "$(hostnamectl | grep -i system | cut -d : -f2)" "$(lsb_release -sd)" "$(grep -i description /etc/lsb-release | cut -d \" -f2)" "$(grep . /etc/redhat-release)" "$(grep . /etc/issue | cut -d \\ -f1 | sed '/^[ ]*$/d')")
 
@@ -62,11 +63,13 @@ if [[ -z $(type -P curl) ]]; then
     $PKG_INSTALL curl || { echo ""; red " [错误] curl 安装失败！请检查网络或系统源。"; exit 1; }
 fi
 
-# 获取公网真实IP
+# 获取公网真实IP (优化双栈并发与超时体验)
 realip() {
-    ip=$(curl -s4m3 ip.sb -k | grep -m 1 -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" || curl -s4m3 ifconfig.me -k | grep -m 1 -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" || curl -s4m3 api.ipify.org -k | grep -m 1 -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}")
+    ip=$(curl -s --max-time 3 ip.sb -k | grep -m 1 -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}|([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:)*:[0-9a-fA-F]{1,4}")
+    
     if [[ -z "$ip" ]]; then
-        ip=$(curl -s6m3 ip.sb -k || curl -s6m3 ifconfig.me -k || curl -s6m3 api64.ipify.org -k)
+        ip=$(curl -s4m3 api.ipify.org -k || curl -s6m3 api64.ipify.org -k || curl -s4m3 ifconfig.me -k || curl -s6m3 ifconfig.me -k)
+        ip=$(echo "$ip" | grep -m 1 -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}|([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:)*:[0-9a-fA-F]{1,4}")
     fi
     
     if [[ -z "$ip" ]]; then
@@ -83,7 +86,7 @@ gen_random_str() {
 }
 
 # =================================================================
-#  3. 服务管理与防火墙控制封装 (全部开放原生报错输出)
+#  3. 服务管理与防火墙控制封装 (开放原生报错输出并修复 Firewalld)
 # =================================================================
 svc_start()   { if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" start; else systemctl start "$1"; fi; }
 svc_stop()    { if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" stop; else systemctl stop "$1"; fi; }
@@ -110,7 +113,7 @@ open_port() {
     iptables -I INPUT -p $proto --dport $port -j ACCEPT
     ip6tables -I INPUT -p $proto --dport $port -j ACCEPT
     if command -v ufw >/dev/null; then ufw allow $port/$proto; fi
-    if command -v firewall-cmd >/dev/null; then
+    if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld; then
         firewall-cmd --zone=public --add-port=$port/$proto --permanent
         firewall-cmd --reload
     fi
@@ -123,7 +126,7 @@ close_port() {
     iptables -D INPUT -p $proto --dport $port -j ACCEPT
     ip6tables -D INPUT -p $proto --dport $port -j ACCEPT
     if command -v ufw >/dev/null; then ufw delete allow $port/$proto; fi
-    if command -v firewall-cmd >/dev/null; then
+    if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld; then
         firewall-cmd --zone=public --remove-port=$port/$proto --permanent
         firewall-cmd --reload
     fi
@@ -175,7 +178,7 @@ check_env() {
     if [[ $missing -eq 1 ]]; then
         echo ""
         print_line
-        yellow "  发现缺失前置组件，正在为您自动拉取安装，请查看下方日志..."
+        yellow "  发现缺失前置组件，正在为您自动拉取安装，执行日志如下..."
         echo ""
         
         [[ ! $SYSTEM == "CentOS" ]] && { $PKG_UPDATE || { echo ""; red " [错误] 系统软件源更新失败！请检查网络连接或更换软件源后重试。"; exit 1; }; }
@@ -188,7 +191,6 @@ check_env() {
             $PKG_INSTALL curl wget sudo procps iptables iptables-services iproute python3 openssl socat cronie qrencode || { echo ""; red " [错误] 前置依赖安装失败！请检查系统源或网络后重试。"; exit 1; }
             svc_start crond; svc_enable crond
         else
-            export DEBIAN_FRONTEND=noninteractive
             yellow "  正在尝试修复并清理系统损坏的依赖项..."
             apt-get --fix-broken install -y || { echo ""; red " [错误] 尝试修复系统损坏的依赖项失败！"; exit 1; }
             apt-get autoremove -y
@@ -274,8 +276,8 @@ inst_cert() {
                 local acme_email="$1"
                 if [[ ! -f "/root/.acme.sh/acme.sh" ]]; then
                     yellow "  正在安全拉取 Acme.sh 安装脚本..."
-                    curl -sL --max-time 30 -o /tmp/acme_install.sh https://get.acme.sh
-                    if [[ $? -ne 0 || ! -s /tmp/acme_install.sh ]]; then
+                    curl -sL --max-time 20 -o /tmp/acme_install.sh https://get.acme.sh || curl -sL --max-time 20 -o /tmp/acme_install.sh https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh
+                    if [[ ! -s /tmp/acme_install.sh ]]; then
                         red "  [错误] Acme.sh 下载失败！请检查网络连接或更换 DNS。"
                         rm -f /tmp/acme_install.sh
                         exit 1
@@ -420,7 +422,7 @@ inst_port() {
         iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop"
         ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop"
         if command -v ufw >/dev/null; then ufw allow $firstport:$endport/udp; fi
-        if command -v firewall-cmd >/dev/null; then
+        if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld; then
             firewall-cmd --zone=public --add-port=$firstport-$endport/udp --permanent
             firewall-cmd --reload
         fi
@@ -538,19 +540,19 @@ inst_other_configs() {
 clean_env() {
     local mode="$1"
     
-    local main_port=$(grep -E "^[[:space:]]*listen:" /etc/hysteria/config.yaml | awk -F ':' '{print $NF}' | tr -d ' ' | tr -d '\r')
-    local sub_port=$(cat /etc/hysteria/sub_port.txt | tr -d '\r')
+    local main_port=$(grep -E "^[[:space:]]*listen:" /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ' | tr -d '\r')
+    local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null | tr -d '\r')
 
     [[ -n "$main_port" && "$main_port" =~ ^[0-9]+$ ]] && close_port "$main_port" "udp"
     [[ -n "$sub_port" && "$sub_port" =~ ^[0-9]+$ ]] && close_port "$sub_port" "tcp"
 
     if command -v iptables >/dev/null; then
-        iptables -t nat -nL PREROUTING --line-numbers | grep "hy2-port-hop" | awk '{print $1}' | sort -nr | while read -r num; do
+        iptables -t nat -nL PREROUTING --line-numbers 2>/dev/null | grep "hy2-port-hop" | awk '{print $1}' | sort -nr | while read -r num; do
             iptables -t nat -D PREROUTING "$num"
         done
     fi
     if command -v ip6tables >/dev/null; then
-        ip6tables -t nat -nL PREROUTING --line-numbers | grep "hy2-port-hop" | awk '{print $1}' | sort -nr | while read -r num; do
+        ip6tables -t nat -nL PREROUTING --line-numbers 2>/dev/null | grep "hy2-port-hop" | awk '{print $1}' | sort -nr | while read -r num; do
             ip6tables -t nat -D PREROUTING "$num"
         done
     fi
@@ -561,18 +563,15 @@ clean_env() {
         local e_port=$(echo "$hop_range" | cut -d':' -f2)
         if [[ -n "$f_port" && -n "$e_port" ]]; then
             if command -v ufw >/dev/null; then ufw delete allow "$f_port:$e_port/udp"; fi
-            if command -v firewall-cmd >/dev/null; then
+            if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld; then
                 firewall-cmd --zone=public --remove-port="$f_port-$e_port/udp" --permanent
                 firewall-cmd --reload
             fi
         fi
-    else
-        echo ""
-        yellow "  [提示] 未找到端口跳跃记录文件。如果您之前开启了端口跳跃，请手动检查并清理 UFW / Firewalld 中的 UDP 端口范围。"
     fi
 
-    svc_stop hysteria-server; svc_disable hysteria-server
-    svc_stop hysteria-sub; svc_disable hysteria-sub
+    svc_stop hysteria-server 2>/dev/null; svc_disable hysteria-server 2>/dev/null
+    svc_stop hysteria-sub 2>/dev/null; svc_disable hysteria-sub 2>/dev/null
 
     if [[ $SYSTEM == "Alpine" ]]; then
         rm -f /etc/init.d/hysteria-server /etc/init.d/hysteria-sub
@@ -586,8 +585,12 @@ clean_env() {
     
     if [[ "$mode" == "all" ]]; then
         rm -f /root/cert.crt /root/private.key /root/ca.log
+        rm -rf /root/.acme.sh
         echo ""
-        yellow "  [提示] 为防止影响您的其他业务，Acme.sh 环境已被保留，未执行全局卸载。"
+        green "  [提示] 证书及 Acme.sh 环境已彻底清除。"
+    elif [[ "$mode" == "keep" ]]; then
+        echo ""
+        yellow "  [提示] Acme.sh 环境及已申请的证书被保留，未执行全局卸载。"
     fi
 }
 
@@ -757,7 +760,10 @@ class DualStackServer(socketserver.TCPServer):
 
 with DualStackServer(("", PORT), SecureSubHandler) as httpd:
     if "${is_insecure_url}" == "0" and os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        try:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        except AttributeError:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS)
         context.load_cert_chain(certfile=CERT_FILE, keyfile=KEY_FILE)
         httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
     httpd.serve_forever()
@@ -830,9 +836,10 @@ insthysteria() {
         *) red " [错误] 不支持的架构: $arch" && exit 1 ;;
     esac
     
-    wget -N -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}"
+    wget -N -v -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}" || \
+    wget -N -v -O /usr/local/bin/hysteria "https://mirror.ghproxy.com/https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}"
     
-    if [[ $? -ne 0 ]] || [[ ! -s /usr/local/bin/hysteria ]]; then
+    if [[ ! -s /usr/local/bin/hysteria ]]; then
         red " [错误] Hysteria 2 核心下载失败或文件损坏，请根据上方输出排查网络！"
         rm -f /usr/local/bin/hysteria
         exit 1
@@ -974,9 +981,18 @@ EOF
 
 unsthysteria() {
     echo ""
-    yellow "  正在安全地清理系统网络、防火墙规则，并彻底卸载相关证书..."
+    echo -en " ${LIGHT_YELLOW} ▶ 是否彻底删除已申请的域名证书及 Acme.sh 环境？(y/n) [默认: y]: ${PLAIN}"
+    read rm_cert
+    [[ -z "$rm_cert" ]] && rm_cert="y"
+
+    yellow "  正在安全地清理系统网络、防火墙规则，并卸载相关文件..."
     
-    clean_env "all"
+    if [[ "$rm_cert" == "y" || "$rm_cert" == "Y" ]]; then
+        clean_env "all"
+    else
+        clean_env "keep"
+    fi
+    
     rm -f /usr/local/bin/hy2
 
     echo ""
@@ -1270,6 +1286,18 @@ enable_bbr() {
     sed -i '/^[[:space:]]*net\.core\.netdev_max_backlog/d' /etc/sysctl.conf
     sed -i '/^[[:space:]]*net\.core\.somaxconn/d' /etc/sysctl.conf
 
+    # 动态计算 UDP 缓冲区，防止小内存 VPS(如 512M) 发生 OOM 崩溃
+    local total_mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+    local mem_pages=$(( total_mem_kb / 4 ))
+    
+    # 限制 UDP 最大占用物理内存的 25%
+    local udp_max=$(( mem_pages / 4 ))
+    # 设定安全底线，防止由于内存太小导致算出来的值不满足最低要求
+    [[ $udp_max -lt 65536 ]] && udp_max=65536
+    
+    local udp_mid=$(( udp_max * 3 / 4 ))
+    local udp_min=$(( udp_max / 2 ))
+
     # 注入极限高并发 UDP 队列调优参数
     echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
     echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
@@ -1279,7 +1307,7 @@ enable_bbr() {
     echo "net.core.wmem_default=26214400" >> /etc/sysctl.conf
     echo "net.core.netdev_max_backlog=100000" >> /etc/sysctl.conf
     echo "net.core.somaxconn=65535" >> /etc/sysctl.conf
-    echo "net.ipv4.udp_mem=65536 131072 262144" >> /etc/sysctl.conf
+    echo "net.ipv4.udp_mem=$udp_min $udp_mid $udp_max" >> /etc/sysctl.conf
     
     sysctl -p
     
