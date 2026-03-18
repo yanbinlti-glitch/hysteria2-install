@@ -62,11 +62,17 @@ if [[ -z $(type -P curl) ]]; then
     $PKG_INSTALL curl || { echo ""; red " [错误] curl 安装失败！请检查网络或系统源。"; exit 1; }
 fi
 
-# 获取公网真实IP (修复管道截断Bug)
+# 获取公网真实IP
 realip() {
     ip=$(curl -s4m3 ip.sb -k | grep -m 1 -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" || curl -s4m3 ifconfig.me -k | grep -m 1 -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" || curl -s4m3 api.ipify.org -k | grep -m 1 -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}")
     if [[ -z "$ip" ]]; then
         ip=$(curl -s6m3 ip.sb -k || curl -s6m3 ifconfig.me -k || curl -s6m3 api64.ipify.org -k)
+    fi
+    
+    if [[ -z "$ip" ]]; then
+        echo ""
+        red " [错误] 无法获取本机的公网 IP，请检查 VPS 的网络连接或 DNS 设置！"
+        exit 1
     fi
 }
 
@@ -125,7 +131,7 @@ close_port() {
 }
 
 # =================================================================
-#  4. 环境检查与预处理 (带错误拦截与阻断)
+#  4. 环境检查与预处理
 # =================================================================
 check_env() {
     clear
@@ -211,15 +217,13 @@ inst_cert() {
     green "                    Hysteria 2 证书配置                    "
     print_line
     echo ""
-    echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}必应自签证书 + Pinning 防中间人指纹 (推荐小白，默认)${PLAIN}"
+    echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}必应自签伪装证书 (强制不安全/跳过证书验证，默认)${PLAIN}"
     echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_PURPLE}Acme 脚本申请 (需 Cloudflare 域名托管)${PLAIN}"
     echo -e "    ${LIGHT_GREEN}[3]${PLAIN} ${LIGHT_YELLOW}自定义证书路径${PLAIN}"
     echo ""
     echo -en " ${LIGHT_YELLOW} ▶ 请输入选项 [1-3] (默认1): ${PLAIN}"
     read certInput
     [[ -z $certInput ]] && certInput=1
-    
-    rm -f /etc/hysteria/pin.txt 
 
     if [[ $certInput == 2 ]]; then
         cert_path="/root/cert.crt"
@@ -250,6 +254,7 @@ inst_cert() {
                 echo ""
                 yellow " [警告] 域名解析的 IP ($domainIP) 与当前真实 IP ($ip) 不匹配！"
                 yellow " [警告] Hysteria 2 必须使用真实 IP 直连，请确保 Cloudflare 已关闭小云朵 (DNS Only)。"
+                yellow " [提示] 若您使用的是 IPv4/IPv6 双栈服务器，此处可能由于 IP 类型不一致出现误报，请自行确认解析无误。"
                 echo -en " ${LIGHT_YELLOW} ▶ 是否确认并继续？(y/n) [默认: y]: ${PLAIN}"
                 read force_cert
                 [[ -z $force_cert ]] && force_cert="y"
@@ -286,6 +291,8 @@ inst_cert() {
             bash /root/.acme.sh/acme.sh --upgrade --auto-upgrade
             bash /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt
             
+            rm -f /root/cert.crt /root/private.key /root/ca.log
+
             yellow " 正在通过 DNS API 验证所有权，请留意下方执行日志 (约1-3分钟)..."
             bash /root/.acme.sh/acme.sh --issue --dns dns_cf -d ${domain} -k ec-256
             
@@ -337,10 +344,6 @@ inst_cert() {
         openssl ecparam -genkey -name prime256v1 -out /etc/hysteria/private.key
         openssl req -new -x509 -days 36500 -key /etc/hysteria/private.key -out /etc/hysteria/cert.crt -subj "/CN=www.bing.com"
         chmod 644 /etc/hysteria/cert.crt; chmod 600 /etc/hysteria/private.key
-        
-        cert_pin=$(openssl x509 -in /etc/hysteria/cert.crt -noout -fingerprint -sha256 | cut -d "=" -f 2 | tr -d ':')
-        echo "$cert_pin" > /etc/hysteria/pin.txt
-        green " 已提取证书高强度安全指纹 (Pinning): $cert_pin"
 
         hy_domain="www.bing.com"
         domain="www.bing.com"
@@ -566,20 +569,10 @@ generate_client_configs() {
     local s_obfs_pwd=$(awk '/obfs:/{flag=1} flag && /password:/{print $2; flag=0}' /etc/hysteria/config.yaml | tr -d '"' | tr -d "'")
     local is_insecure_url=$(cat /etc/hysteria/insecure_state.txt 2>/dev/null || echo "1")
     
-    local pin_hash=""
-    [[ -f /etc/hysteria/pin.txt ]] && pin_hash=$(cat /etc/hysteria/pin.txt)
-    
     local clash_cert_verify="false"
-    local pin_param=""
-    local clash_pin_block=""
     
-    if [[ -n "$pin_hash" ]]; then
-        is_insecure_url="0"
-        pin_param="&pinSHA256=$pin_hash"
-        clash_pin_block="    pinSHA256: \"$pin_hash\""
-        clash_cert_verify="false"
-        echo "$ip" > /etc/hysteria/sub_host.txt
-    elif [[ "$is_insecure_url" == "0" ]]; then
+    # 彻底摒弃 Pinning 逻辑，仅通过 insecure_state 判断是否开启跳过验证
+    if [[ "$is_insecure_url" == "0" ]]; then
         clash_cert_verify="false"
         echo "$c_domain" > /etc/hysteria/sub_host.txt
     else
@@ -620,11 +613,13 @@ generate_client_configs() {
     mkdir -p "$web_dir/$sub_uuid"
     echo "$sub_uuid" > /etc/hysteria/sub_path.txt
 
-    local url="hy2://$s_pwd@$uri_ip:$primary_port/?insecure=${is_insecure_url}&sni=$c_domain${mport_param}${obfs_param}${pin_param}#${custom_node_name}"
+    # 动态拼接 Hysteria 标准链接 (携带 insecure 参数)
+    local url="hy2://$s_pwd@$uri_ip:$primary_port/?insecure=${is_insecure_url}&sni=$c_domain${mport_param}${obfs_param}#${custom_node_name}"
     echo "$url" > "$web_dir/$sub_uuid/url.txt"
     
     echo "$url" | base64 | tr -d '\r\n' > "$web_dir/$sub_uuid/sub_b64.txt"
 
+    # 生成 Clash 订阅配置 (动态应用 skip-cert-verify: true/false)
     cat << EOF > "$web_dir/$sub_uuid/clash-meta-sub.yaml"
 port: 7890
 socks-port: 7891
@@ -642,7 +637,6 @@ $([[ -n "$hop_ports" ]] && echo "    ports: '$hop_ports'")
     password: "$s_pwd"
     sni: "$c_domain"
     skip-cert-verify: $clash_cert_verify
-$(echo -e "$clash_pin_block")
     alpn:
       - h3
 $(echo -e "$clash_obfs_block")
@@ -842,6 +836,7 @@ EOF
     inst_sub_port
     inst_other_configs
 
+    # 如果是假域名，强制开启跳过验证
     if [[ "$hy_domain" == "www.bing.com" ]]; then
         cert_insecure_yaml="true"
         cert_insecure_url="1"
@@ -895,6 +890,7 @@ EOF
     local last_ip=$ip
     [[ "$ip" == *":"* ]] && last_ip="[$ip]"
 
+    # 生成供 NekoBox 等直接导入的通用 YAML 配置
     cat << EOF > /etc/hysteria/hy-client.yaml
 server: $last_ip:$last_port
 auth: $auth_pwd
@@ -941,12 +937,12 @@ showconf() {
     local is_insecure=$(cat /etc/hysteria/insecure_state.txt 2>/dev/null)
     local main_port=$(grep '^listen:' /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ')
     local hop_ports=$(grep '^server:' /etc/hysteria/hy-client.yaml 2>/dev/null | awk -F ',' '{print $2}')
-    local pin_hash=$(cat /etc/hysteria/pin.txt 2>/dev/null)
     
     [[ -z "$sub_host" || "$sub_host" == "" ]] && sub_host=$ip
     
+    # 因为关闭了 pinning，所以假证书直接按 HTTP 方式下发订阅
     local protocol="https"
-    [[ "$is_insecure" == "1" && -z "$pin_hash" ]] && protocol="http"
+    [[ "$is_insecure" == "1" ]] && protocol="http"
     
     local sub_url=""
     if [[ "$sub_host" == *":"* ]]; then
@@ -1048,7 +1044,7 @@ edit_config() {
         svc_start hysteria-server
         sleep 1
         
-        # 增加重启后订阅实时同步刷新 (修复修改配置后客户端失联 Bug)
+        # 增加重启后订阅实时同步刷新
         if [[ $SYSTEM == "Alpine" ]]; then
             if rc-service hysteria-server status | grep -q 'started'; then
                 green "  重启成功！新配置已生效。"
@@ -1115,11 +1111,13 @@ EOF
     if [[ -z "$traffic_data" || "$traffic_data" =~ "404" ]]; then
         red "  获取数据失败，Hysteria 服务可能未正常运行，或 API 端口超时。"
     else
-        export TRAFFIC_JSON_DATA="$traffic_data"
+        export TRAFFIC_JSON_DATA="${traffic_data:-{}}"
         python3 -c "
 import os, json
 try:
-    data_str = os.environ.get('TRAFFIC_JSON_DATA', '{}')
+    data_str = os.environ.get('TRAFFIC_JSON_DATA', '{}').strip()
+    if not data_str:
+        data_str = '{}'
     data = json.loads(data_str)
     if not data:
         print('\033[33m  暂无任何流量消耗记录或客户端连接。\033[0m')
@@ -1211,7 +1209,7 @@ enable_bbr() {
     echo "net.core.wmem_default=26214400" >> /etc/sysctl.conf
     echo "net.ipv4.udp_mem=262144 524288 1048576" >> /etc/sysctl.conf
     
-    sysctl -p
+    sysctl -p 2>/dev/null
     
     echo ""
     green "  BBR 及 UDP 缓冲区底层优化开启成功！可显著降低丢包率。"
@@ -1237,7 +1235,6 @@ check_cert() {
     fi
 
     local cert_path=$(grep -w 'cert:' /etc/hysteria/config.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
-    local pin_hash=$(cat /etc/hysteria/pin.txt 2>/dev/null)
 
     if [[ -z "$cert_path" || ! -f "$cert_path" ]]; then
         red "  [✘] 未找到证书文件！证书可能未成功申请，或路径配置有误。"
@@ -1275,9 +1272,7 @@ check_cert() {
             if [[ "$cert_subject" == "www.bing.com" ]]; then
                 echo ""
                 yellow "  ℹ 提示: 当前使用的是系统自动生成的【必应自签伪装证书】。"
-                if [[ -n "$pin_hash" ]]; then
-                    green "  ✔ 已启用高强度 Pinning 指纹验证，无惧中间人攻击。"
-                fi
+                yellow "  ⚠ 注意: 当前配置为 Insecure 模式，客户端将跳过证书验证。"
             elif [[ "$cert_issuer" =~ "Let's Encrypt" || "$cert_issuer" =~ "ZeroSSL" || "$cert_issuer" =~ "Google" ]]; then
                 echo ""
                 green "  ℹ 提示: 当前使用的是受信任的【真实域名证书】。"
