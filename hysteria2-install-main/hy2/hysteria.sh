@@ -121,7 +121,7 @@ check_env() {
             ${PACKAGE_INSTALL[int]} curl wget sudo procps iptables ip6tables iproute2 python3 openssl socat cronie qrencode
             svc_start crond
             svc_enable crond
-        elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" ]]; then
+        elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" || $SYSTEM == "Alma" || $SYSTEM == "Rocky" ]]; then
             ${PACKAGE_INSTALL[int]} epel-release || true
             ${PACKAGE_INSTALL[int]} curl wget sudo procps iptables iptables-services iproute python3 openssl socat cronie qrencode
             svc_start crond
@@ -283,7 +283,9 @@ inst_port(){
     yellow "将在 Hysteria 2 节点使用的端口是：$port"
     
     iptables -I INPUT -p udp --dport $port -j ACCEPT
-    ip6tables -I INPUT -p udp --dport $port -j ACCEPT
+    ip6tables -I INPUT -p udp --dport $port -j ACCEPT 2>/dev/null || true
+    if command -v ufw >/dev/null 2>&1; then ufw allow $port/udp >/dev/null 2>&1; fi
+    if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --zone=public --add-port=$port/udp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1; fi
     
     save_iptables
 
@@ -310,7 +312,9 @@ inst_jump(){
 
         modprobe ip6table_nat 2>/dev/null || true
         iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport  -j DNAT --to-destination :$port
-        ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport  -j DNAT --to-destination :$port
+        ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport  -j DNAT --to-destination :$port 2>/dev/null || true
+        if command -v ufw >/dev/null 2>&1; then ufw allow $firstport:$endport/udp >/dev/null 2>&1; fi
+        if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --zone=public --add-port=$firstport-$endport/udp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1; fi
         
         save_iptables
     fi
@@ -486,7 +490,6 @@ EOF
     local sub_port=$sub_port_input
     echo "$sub_port" > /etc/hysteria/sub_port.txt
 
-    # 修复证书读取权限：存放在 web_dir 目录下以确保 nobody 权限可用
     local sub_cert_dir="$web_dir/certs"
     mkdir -p "$sub_cert_dir"
     cp "$cert_path" "$sub_cert_dir/cert.crt" 2>/dev/null || cp /etc/hysteria/cert.crt "$sub_cert_dir/cert.crt" 2>/dev/null
@@ -499,6 +502,7 @@ import http.server
 import socketserver
 import ssl
 import os
+import urllib.parse
 
 PORT = $sub_port
 SUB_UUID = "$sub_uuid"
@@ -507,7 +511,11 @@ KEY_FILE = "$sub_cert_dir/private.key"
 
 class SmartSubHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
-        if self.path.strip('/') == SUB_UUID:
+        # 核心修复点：使用 urllib 解析剥离问号及后缀参数，防止客户端请求引发 403 拦截
+        parsed = urllib.parse.urlparse(self.path)
+        req_path = parsed.path.strip('/')
+        
+        if req_path == SUB_UUID:
             ua = self.headers.get('User-Agent', '').lower()
             if 'clash' in ua or 'meta' in ua or 'verge' in ua or 'stash' in ua:
                 self.path = f"/{SUB_UUID}/clash-meta-sub.yaml"
@@ -521,7 +529,6 @@ class SmartSubHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(b"<h1 style='text-align:center;margin-top:20%;'>403 Forbidden</h1>")
 
 with socketserver.TCPServer(("", PORT), SmartSubHandler) as httpd:
-    # 智能降级机制：仅当使用真实域名时启用 HTTPS 包装
     if "${is_insecure_url}" == "0" and os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(certfile=CERT_FILE, keyfile=KEY_FILE)
@@ -531,7 +538,11 @@ EOF
 
     chown -R nobody "$web_dir" || true
     
-    iptables -I INPUT -p tcp --dport $sub_port -j ACCEPT
+    # 强制系统双端防火墙穿透，防止无响应
+    iptables -I INPUT -p tcp --dport $sub_port -j ACCEPT 2>/dev/null || true
+    ip6tables -I INPUT -p tcp --dport $sub_port -j ACCEPT 2>/dev/null || true
+    if command -v ufw >/dev/null 2>&1; then ufw allow $sub_port/tcp >/dev/null 2>&1; fi
+    if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --zone=public --add-port=$sub_port/tcp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1; fi
     save_iptables
     
     local py_path=$(command -v python3)
@@ -572,7 +583,7 @@ EOF
     svc_stop hysteria-sub || true
     svc_start hysteria-sub
     
-    green "智能订阅服务已通过系统守护进程启动，并已开启路径安全保护与自适应证书配置..."
+    green "智能订阅服务已通过系统守护进程启动，防抓取路径过滤已配置..."
 }
 
 showconf(){
@@ -586,7 +597,6 @@ showconf(){
     local is_insecure=$(cat /etc/hysteria/insecure_state.txt 2>/dev/null)
     [[ -z "$sub_host" ]] && sub_host=$ip
     
-    # 根据是否是自签证书智能判断链接协议
     local protocol="https"
     [[ "$is_insecure" == "1" ]] && protocol="http"
     
@@ -612,29 +622,29 @@ showconf(){
     echo ""
     yellow "================ 📱 手机扫码直连节点 ========================"
     
+    # 检测并重试安装 qrencode
     if ! command -v qrencode &> /dev/null; then
-        yellow "⏳ 检测到缺失二维码生成组件 (qrencode)，正在尝试为您自动补全..."
-        if [[ ! $SYSTEM == "CentOS" ]]; then
-            ${PACKAGE_UPDATE[int]} >/dev/null 2>&1
-        fi
-        if [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" ]]; then
-            ${PACKAGE_INSTALL[int]} epel-release >/dev/null 2>&1
-        fi
-        ${PACKAGE_INSTALL[int]} qrencode >/dev/null 2>&1
-        
-        if command -v qrencode &> /dev/null; then
-            green "✨ qrencode 组件安装成功！"
-        else
-            red "⚠️ 自动安装 qrencode 失败，将跳过二维码生成。请稍后尝试手动安装。"
+        yellow "⏳ 检测到缺失二维码生成组件，正在尝试为您自动补全..."
+        if [[ $SYSTEM == "Ubuntu" || $SYSTEM == "Debian" ]]; then
+            apt-get update -y >/dev/null 2>&1
+            apt-get install -y qrencode >/dev/null 2>&1
+        elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" || $SYSTEM == "Alma" || $SYSTEM == "Rocky" ]]; then
+            yum install -y epel-release >/dev/null 2>&1
+            yum install -y qrencode >/dev/null 2>&1
+        elif [[ $SYSTEM == "Alpine" ]]; then
+            apk update >/dev/null 2>&1
+            apk add qrencode >/dev/null 2>&1
         fi
     fi
 
+    # 如果本地工具仍然没装上，启用强力在线 API (双保险)
     if command -v qrencode >/dev/null; then
         echo -e "💡 ${YELLOW}提示：如果下方二维码显示带有断层或横纹，请在 SSH 客户端中将字体缩小，或确保行间距设置为 1.0${PLAIN}"
         echo ""
         qrencode -t ANSIUTF8 "$raw_url"
     else
-        red "⚠️ 二维码组件缺失或生成失败。"
+        yellow "⚠️ 本地终端不支持直接生成，正通过安全在线 API 为您绘制二维码..."
+        curl -s -d "$raw_url" https://qrenco.de
     fi
     echo ""
     yellow "==========================================================="
@@ -642,7 +652,7 @@ showconf(){
     yellow " 1. 扫码功能：请打开 Shadowrocket / v2rayNG 的扫一扫功能直接扫描上方二维码。"
     yellow " 2. 智能订阅：自动识别客户端 UA！填入 Clash 自动获取 YAML，填入 v2rayN 获取 Base64！"
     if [[ "$is_insecure" == "1" ]]; then
-        yellow " 3. 当前为自建伪装证书，为了保证各客户端兼容拉取配置，订阅链接已智能匹配为 HTTP 协议。"
+        yellow " 3. 当前为自签伪装证书，为了保证客户端兼容拉取配置，订阅链接已智能匹配为 HTTP 协议。"
     else
         yellow " 3. 安全加密：您的订阅服务已全面升级为 HTTPS 加密防嗅探机制，请放心更新节点。"
     fi
@@ -903,10 +913,14 @@ unsthysteria(){
         ip6tables -D INPUT -p udp --dport $main_port -j ACCEPT || true
         iptables-save | grep -v "DNAT --to-destination :$main_port" | iptables-restore || true
         ip6tables-save | grep -v "DNAT --to-destination :$main_port" | ip6tables-restore || true
-        yellow "提示：与主端口相关的 NAT 跳转规则已被自动清理。"
+        if command -v ufw >/dev/null 2>&1; then ufw delete allow $main_port/udp >/dev/null 2>&1 || true; fi
+        if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --zone=public --remove-port=$main_port/udp --permanent >/dev/null 2>&1 || true; firewall-cmd --reload >/dev/null 2>&1 || true; fi
+        yellow "提示：与主端口相关的网络规则已被自动清理。"
     fi
     if [[ -n "$sub_port" && "$sub_port" =~ ^[0-9]+$ ]]; then
         iptables -D INPUT -p tcp --dport $sub_port -j ACCEPT || true
+        if command -v ufw >/dev/null 2>&1; then ufw delete allow $sub_port/tcp >/dev/null 2>&1 || true; fi
+        if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --zone=public --remove-port=$sub_port/tcp --permanent >/dev/null 2>&1 || true; firewall-cmd --reload >/dev/null 2>&1 || true; fi
     fi
 
     svc_stop hysteria-server || true
