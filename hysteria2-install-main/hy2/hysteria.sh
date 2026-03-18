@@ -58,11 +58,11 @@ done
 [[ -z $SYSTEM ]] && red " [错误] 目前暂不支持您的 VPS 操作系统！" && exit 1
 
 if [[ -z $(type -P curl) ]]; then
-    [[ ! $SYSTEM == "CentOS" ]] && $PKG_UPDATE >/dev/null 2>&1
-    $PKG_INSTALL curl >/dev/null 2>&1
+    [[ ! $SYSTEM == "CentOS" ]] && $PKG_UPDATE
+    $PKG_INSTALL curl
 fi
 
-# 获取公网真实IP (已增加备用接口，提高鲁棒性)
+# 获取公网真实IP
 realip() {
     ip=$(curl -s4m3 ip.sb -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1 || curl -s4m3 ifconfig.me -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1 || curl -s4m3 api.ipify.org -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1)
     if [[ -z "$ip" ]]; then
@@ -71,7 +71,7 @@ realip() {
 }
 
 # =================================================================
-#  3. 服务管理与防火墙控制封装 (防止代码冗余与报错)
+#  3. 服务管理与防火墙控制封装 (日志已全开)
 # =================================================================
 svc_start()   { if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" start || true; else systemctl start "$1" || true; fi; }
 svc_stop()    { if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" stop || true; else systemctl stop "$1" || true; fi; }
@@ -80,25 +80,25 @@ svc_disable() { if [[ $SYSTEM == "Alpine" ]]; then rc-update del "$1" default ||
 
 save_iptables() {
     if [[ $SYSTEM == "Alpine" ]]; then
-        rc-service iptables save >/dev/null 2>&1 || true
-        rc-service ip6tables save >/dev/null 2>&1 || true
+        rc-service iptables save || true
+        rc-service ip6tables save || true
     elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" ]]; then
-        service iptables save >/dev/null 2>&1 || true
-        service ip6tables save >/dev/null 2>&1 || true
+        service iptables save || true
+        service ip6tables save || true
     else
-        netfilter-persistent save >/dev/null 2>&1 || true
+        netfilter-persistent save || true
     fi
 }
 
 open_port() {
     local port=$1
     local proto=$2
-    iptables -I INPUT -p $proto --dport $port -j ACCEPT >/dev/null 2>&1 || true
-    ip6tables -I INPUT -p $proto --dport $port -j ACCEPT >/dev/null 2>&1 || true
-    if command -v ufw >/dev/null 2>&1; then ufw allow $port/$proto >/dev/null 2>&1 || true; fi
+    iptables -I INPUT -p $proto --dport $port -j ACCEPT || true
+    ip6tables -I INPUT -p $proto --dport $port -j ACCEPT || true
+    if command -v ufw >/dev/null 2>&1; then ufw allow $port/$proto || true; fi
     if command -v firewall-cmd >/dev/null 2>&1; then
-        firewall-cmd --zone=public --add-port=$port/$proto --permanent >/dev/null 2>&1 || true
-        firewall-cmd --reload >/dev/null 2>&1 || true
+        firewall-cmd --zone=public --add-port=$port/$proto --permanent || true
+        firewall-cmd --reload || true
     fi
     save_iptables
 }
@@ -106,12 +106,12 @@ open_port() {
 close_port() {
     local port=$1
     local proto=$2
-    iptables -D INPUT -p $proto --dport $port -j ACCEPT >/dev/null 2>&1 || true
-    ip6tables -D INPUT -p $proto --dport $port -j ACCEPT >/dev/null 2>&1 || true
-    if command -v ufw >/dev/null 2>&1; then ufw delete allow $port/$proto >/dev/null 2>&1 || true; fi
+    iptables -D INPUT -p $proto --dport $port -j ACCEPT || true
+    ip6tables -D INPUT -p $proto --dport $port -j ACCEPT || true
+    if command -v ufw >/dev/null 2>&1; then ufw delete allow $port/$proto || true; fi
     if command -v firewall-cmd >/dev/null 2>&1; then
-        firewall-cmd --zone=public --remove-port=$port/$proto --permanent >/dev/null 2>&1 || true
-        firewall-cmd --reload >/dev/null 2>&1 || true
+        firewall-cmd --zone=public --remove-port=$port/$proto --permanent || true
+        firewall-cmd --reload || true
     fi
     save_iptables
 }
@@ -161,10 +161,10 @@ check_env() {
     if [[ $missing -eq 1 ]]; then
         echo ""
         print_line
-        yellow "  发现缺失前置组件，正在为您自动拉取安装，请稍候..."
+        yellow "  发现缺失前置组件，正在为您自动拉取安装，请查看下方日志..."
         echo ""
         
-        [[ ! $SYSTEM == "CentOS" ]] && $PKG_UPDATE >/dev/null 2>&1
+        [[ ! $SYSTEM == "CentOS" ]] && $PKG_UPDATE
         
         if [[ $SYSTEM == "Alpine" ]]; then
             $PKG_INSTALL curl wget sudo procps iptables ip6tables iproute2 python3 openssl socat cronie libqrencode-tools
@@ -210,7 +210,6 @@ inst_cert() {
     if [[ $certInput == 2 ]]; then
         cert_path="/root/cert.crt"
         key_path="/root/private.key"
-        # 已移除高危的 chmod a+x /root 权限泄露
         if [[ -f /root/cert.crt && -f /root/private.key && -f /root/ca.log ]]; then
             domain=$(cat /root/ca.log)
             echo ""
@@ -224,7 +223,8 @@ inst_cert() {
             [[ -z $domain ]] && red " 未输入域名，无法执行操作！" && exit 1
             green " 已记录域名：$domain"
             
-            domainIP=$(python3 -c "import socket; print(socket.gethostbyname('${domain}'))" 2>/dev/null)
+            # [修复] 兼容 IPv4 和 IPv6 解析
+            domainIP=$(python3 -c "import socket; print(socket.getaddrinfo('${domain}', None)[0][4][0])" 2>/dev/null)
             
             if [[ "$domainIP" != "$ip" ]]; then
                 echo ""
@@ -263,16 +263,17 @@ inst_cert() {
                 curl https://get.acme.sh | sh -s email="$cf_email"
             fi
             
-            bash ~/.acme.sh/acme.sh --upgrade --auto-upgrade
-            bash ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
+            bash /root/.acme.sh/acme.sh --upgrade --auto-upgrade
+            bash /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt
             
-            yellow " 正在通过 DNS API 验证所有权，请耐心等待 (约1-3分钟)..."
-            bash ~/.acme.sh/acme.sh --issue --dns dns_cf -d ${domain} -k ec-256
+            yellow " 正在通过 DNS API 验证所有权，请留意下方执行日志 (约1-3分钟)..."
+            bash /root/.acme.sh/acme.sh --issue --dns dns_cf -d ${domain} -k ec-256
             
-            local reload_cmd="systemctl restart hysteria-server"
-            [[ $SYSTEM == "Alpine" ]] && reload_cmd="rc-service hysteria-server restart"
+            # [修复] 重启命令加入复制证书逻辑，确保 Python 订阅服务端同步更新
+            local reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && systemctl restart hysteria-server && systemctl restart hysteria-sub"
+            [[ $SYSTEM == "Alpine" ]] && reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && rc-service hysteria-server restart && rc-service hysteria-sub restart"
             
-            bash ~/.acme.sh/acme.sh --install-cert -d ${domain} --key-file /root/private.key --fullchain-file /root/cert.crt --ecc --reloadcmd "$reload_cmd"
+            bash /root/.acme.sh/acme.sh --install-cert -d ${domain} --key-file /root/private.key --fullchain-file /root/cert.crt --ecc --reloadcmd "$reload_cmd"
             
             if [[ -f /root/cert.crt && -f /root/private.key ]]; then
                 echo $domain > /root/ca.log
@@ -280,7 +281,7 @@ inst_cert() {
                 green " 证书申请成功！已保存至 /root/ 目录下。"
                 hy_domain=$domain
             else
-                red " 证书申请失败！请检查认证信息或重试。"
+                red " 证书申请失败！请向上翻阅执行日志检查具体报错信息。"
                 exit 1
             fi
         fi
@@ -309,8 +310,8 @@ inst_cert() {
         cert_path="/etc/hysteria/cert.crt"
         key_path="/etc/hysteria/private.key"
         
-        openssl ecparam -genkey -name prime256v1 -out /etc/hysteria/private.key >/dev/null 2>&1
-        openssl req -new -x509 -days 36500 -key /etc/hysteria/private.key -out /etc/hysteria/cert.crt -subj "/CN=www.bing.com" >/dev/null 2>&1
+        openssl ecparam -genkey -name prime256v1 -out /etc/hysteria/private.key
+        openssl req -new -x509 -days 36500 -key /etc/hysteria/private.key -out /etc/hysteria/cert.crt -subj "/CN=www.bing.com"
         chmod 644 /etc/hysteria/cert.crt; chmod 600 /etc/hysteria/private.key
         
         hy_domain="www.bing.com"
@@ -321,8 +322,7 @@ inst_cert() {
 inst_port() {
     echo ""
     print_line
-    # 已将随机端口范围优化为 10000-65535 避开常用保留端口
-    echo -en " ${LIGHT_YELLOW} ▶ 设置 Hysteria 2 主端口 [1-65535] (回车随机): ${PLAIN}"
+    echo -en " ${LIGHT_YELLOW} ▶ 设置 Hysteria 2 主端口 [10000-65535] (回车随机): ${PLAIN}"
     read port
     [[ -z $port ]] && port=$(shuf -i 10000-65535 -n 1)
     
@@ -342,7 +342,6 @@ inst_port() {
     green " 节点主端口已设置为: $port"
     open_port $port "udp"
 
-    # 跳跃端口逻辑
     echo ""
     yellow "  端口模式选择："
     echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}单端口直连 (默认)${PLAIN}"
@@ -369,13 +368,13 @@ inst_port() {
         done
         green " 已开启端口跳跃范围: $firstport - $endport"
 
-        modprobe ip6table_nat >/dev/null 2>&1 || true
-        iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j DNAT --to-destination :$port
-        ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j DNAT --to-destination :$port >/dev/null 2>&1 || true
-        if command -v ufw >/dev/null 2>&1; then ufw allow $firstport:$endport/udp >/dev/null 2>&1 || true; fi
+        modprobe ip6table_nat || true
+        iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j DNAT --to-destination :$port -m comment --comment "hy2-port-hop"
+        ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j DNAT --to-destination :$port -m comment --comment "hy2-port-hop" || true
+        if command -v ufw >/dev/null 2>&1; then ufw allow $firstport:$endport/udp || true; fi
         if command -v firewall-cmd >/dev/null 2>&1; then
-            firewall-cmd --zone=public --add-port=$firstport-$endport/udp --permanent >/dev/null 2>&1 || true
-            firewall-cmd --reload >/dev/null 2>&1 || true
+            firewall-cmd --zone=public --add-port=$firstport-$endport/udp --permanent || true
+            firewall-cmd --reload || true
         fi
         save_iptables
     fi
@@ -563,8 +562,8 @@ EOF
     mkdir -p "$sub_cert_dir"
     cp "$cert_path" "$sub_cert_dir/cert.crt" 2>/dev/null || cp /etc/hysteria/cert.crt "$sub_cert_dir/cert.crt" 2>/dev/null
     cp "$key_path" "$sub_cert_dir/private.key" 2>/dev/null || cp /etc/hysteria/private.key "$sub_cert_dir/private.key" 2>/dev/null
-    chown -R nobody "$sub_cert_dir" >/dev/null 2>&1 || true
-    chmod 400 "$sub_cert_dir/private.key" >/dev/null 2>&1 || true
+    chown -R nobody "$sub_cert_dir" || true
+    chmod 400 "$sub_cert_dir/private.key" || true
     
     cat << EOF > "$web_dir/server.py"
 import http.server
@@ -621,7 +620,7 @@ with socketserver.TCPServer(("", PORT), SecureSubHandler) as httpd:
     httpd.serve_forever()
 EOF
 
-    chown -R nobody "$web_dir" >/dev/null 2>&1 || true
+    chown -R nobody "$web_dir" || true
     
     local py_path=$(command -v python3)
     if [[ $SYSTEM == "Alpine" ]]; then
@@ -636,7 +635,7 @@ directory="${web_dir}"
 pidfile="/run/hysteria-sub.pid"
 EOF
         chmod +x /etc/init.d/hysteria-sub
-        rc-update add hysteria-sub default >/dev/null 2>&1
+        rc-update add hysteria-sub default
     else
         cat << EOF > /etc/systemd/system/hysteria-sub.service
 [Unit]
@@ -655,7 +654,7 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
-        systemctl enable hysteria-sub >/dev/null 2>&1
+        systemctl enable hysteria-sub
     fi
     
     svc_stop hysteria-sub
@@ -687,7 +686,7 @@ insthysteria() {
     
     wget -N -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/download/${hy_ver}/hysteria-linux-${hy_arch}"
     if [[ $? -ne 0 ]]; then
-        red " Hysteria 2 核心下载失败，请检查网络！"
+        red " Hysteria 2 核心下载失败，请根据上方输出排查网络！"
         exit 1
     fi
     chmod +x /usr/local/bin/hysteria
@@ -805,11 +804,12 @@ unsthysteria() {
     [[ -n "$main_port" && "$main_port" =~ ^[0-9]+$ ]] && close_port $main_port "udp"
     [[ -n "$sub_port" && "$sub_port" =~ ^[0-9]+$ ]] && close_port $sub_port "tcp"
 
-    iptables-save -t nat | grep "DNAT --to-destination :$main_port" | sed 's/^-A /-D /' | while read -r rule; do
-        iptables -t nat $rule >/dev/null 2>&1 || true
+    # [修复] 卸载时精准清理跳跃端口规则，防正则误删
+    iptables-save -t nat | grep "hy2-port-hop" | sed 's/^-A /-D /' | while read -r rule; do
+        iptables -t nat $rule || true
     done
-    ip6tables-save -t nat | grep "DNAT --to-destination :$main_port" | sed 's/^-A /-D /' | while read -r rule; do
-        ip6tables -t nat $rule >/dev/null 2>&1 || true
+    ip6tables-save -t nat | grep "hy2-port-hop" | sed 's/^-A /-D /' | while read -r rule; do
+        ip6tables -t nat $rule || true
     done
 
     svc_stop hysteria-server; svc_disable hysteria-server
@@ -819,11 +819,10 @@ unsthysteria() {
         rm -f /etc/init.d/hysteria-server /etc/init.d/hysteria-sub
     else
         rm -f /etc/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-sub.service
-        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl daemon-reload || true
     fi
     save_iptables
 
-    # 已增加 /usr/local/bin/hy2 的清理逻辑
     rm -rf /usr/local/bin/hysteria /etc/hysteria /var/www/hysteria /usr/local/bin/hy2
 
     echo ""
@@ -836,7 +835,6 @@ unsthysteria() {
 #  7. 二级菜单功能与辅助工具
 # =================================================================
 showconf() {
-    # 已优化冗余代码，直接调用提取好的全局函数获取 IP
     realip
     
     local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null)
@@ -877,14 +875,14 @@ showconf() {
     if ! command -v qrencode &> /dev/null; then
         yellow "  正在加载二维码模块..."
         if [[ $SYSTEM == "Ubuntu" || $SYSTEM == "Debian" ]]; then
-            apt-get update -y >/dev/null 2>&1
-            apt-get install -y qrencode >/dev/null 2>&1
+            apt-get update -y
+            apt-get install -y qrencode
         elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" || $SYSTEM == "Alma" || $SYSTEM == "Rocky" ]]; then
-            yum install -y epel-release >/dev/null 2>&1
-            yum install -y qrencode >/dev/null 2>&1
+            yum install -y epel-release
+            yum install -y qrencode
         elif [[ $SYSTEM == "Alpine" ]]; then
-            apk update >/dev/null 2>&1
-            apk add libqrencode-tools >/dev/null 2>&1
+            apk update
+            apk add libqrencode-tools
         fi
     fi
 
@@ -927,6 +925,10 @@ edit_config() {
     cat /etc/hysteria/config.yaml
     echo ""
     print_line
+    # [修复] 提前警告手动更改端口带来的防火墙风险
+    yellow "  [警告] 如果您在此处修改了 listen (主端口) 或通过系统修改了订阅端口，"
+    yellow "         脚本将无法自动更新系统的防火墙规则！修改后请务必自行放行新端口。"
+    print_line
     echo -en " ${LIGHT_YELLOW} ▶ 是否需要修改配置文件？(y/n) [默认: n]: ${PLAIN}"
     read edit_choice
     if [[ "$edit_choice" == "y" || "$edit_choice" == "Y" ]]; then
@@ -968,6 +970,13 @@ EOF
         svc_stop hysteria-server
         svc_start hysteria-server
         sleep 2
+        # [修复] 避免初次激活就拉取空数据导致懵逼
+        yellow "  流量统计功能已激活！"
+        yellow "  (注意：由于服务刚刚重启，所有历史流量已清空，请稍后重新连接并产生流量后再来查看)"
+        echo ""
+        echo -en " ${LIGHT_YELLOW} ▶ 按回车键返回主菜单... ${PLAIN}"
+        read temp
+        return
     else
         local api_port=$(grep 'listen: 127.0.0.1:' /etc/hysteria/config.yaml | grep -oE '[0-9]+$')
         [[ -z "$api_port" ]] && api_port=$(cat /etc/hysteria/api_port.txt 2>/dev/null)
@@ -1060,7 +1069,7 @@ enable_bbr() {
         sleep 3; return
     fi
 
-    modprobe tcp_bbr >/dev/null 2>&1 || true
+    modprobe tcp_bbr || true
     
     sed -i '/^net\.core\.default_qdisc/d' /etc/sysctl.conf
     sed -i '/^net\.ipv4\.tcp_congestion_control/d' /etc/sysctl.conf
@@ -1078,7 +1087,7 @@ enable_bbr() {
     echo "net.core.wmem_default=26214400" >> /etc/sysctl.conf
     echo "net.ipv4.udp_mem=262144 524288 1048576" >> /etc/sysctl.conf
     
-    sysctl -p >/dev/null 2>&1
+    sysctl -p
     
     echo ""
     green "  BBR 及 UDP 缓冲区底层优化开启成功！可显著降低丢包率。"
@@ -1100,7 +1109,7 @@ menu() {
     echo -e "${LIGHT_GREEN}  ██████╔╝ ╚██████╔╝ ╚██████╔╝███████╗ ██║  ██║${PLAIN}"
     echo -e "${LIGHT_GREEN}  ╚═════╝   ╚══════╝  ╚═════╝ ╚══════╝ ╚═╝  ╚═╝${PLAIN}"
     green "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
-    green " 项目名称 ：Hysteria 2 一键部署与管理脚本 (极致优化版)"
+    green " 项目名称 ：Hysteria 2 一键部署与管理脚本 (排障透明日志版)"
     purple " 项目地址 ：哆啦的Github库 https://github.com/yanbinlti-glitch"
     green "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
     yellow " 脚本快捷方式：hy2 (已自动配置，下次可在终端直接输入 hy2 启动)"
@@ -1133,7 +1142,6 @@ menu() {
     esac
 }
 
-# 引入 while 死循环进行菜单轮询，完美避免堆栈溢出
 while true; do
     menu
 done
