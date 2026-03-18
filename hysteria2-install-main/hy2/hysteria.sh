@@ -1295,7 +1295,7 @@ check_cert() {
     clear
     echo ""
     print_line
-    green "                    证书安装状态与详细信息                 "
+    green "                 证书安装诊断与健康状态检查                "
     print_line
     echo ""
 
@@ -1307,32 +1307,92 @@ check_cert() {
         return
     fi
 
+    # 提取 Cert 和 Key 路径
     local cert_path=$(grep -w 'cert:' /etc/hysteria/config.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
+    local key_path=$(grep -w 'key:' /etc/hysteria/config.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
 
-    if [[ -z "$cert_path" || ! -f "$cert_path" ]]; then
-        red "  [✘] 未找到证书文件！证书可能未成功申请，或路径配置有误。"
-        yellow "  当前配置文件中读取到的证书路径为: ${cert_path:-未配置}"
+    local has_error=0
+
+    # ==========================================
+    # 1. 深度诊断：检查文件是否存在、大小及内容合法性
+    # ==========================================
+    if [[ -z "$cert_path" || -z "$key_path" ]]; then
+        red "  [✘] 配置文件中的证书路径为空！"
+        yellow "  ▶ 报错原因: config.yaml 配置被破坏，或安装时参数未能正确写入。"
+        has_error=1
     else
-        green "  [✔] 证书文件已就绪！"
-        purple "  所在路径: $cert_path"
-        echo ""
-        
+        # 诊断公钥 (Cert)
+        if [[ ! -f "$cert_path" ]]; then
+            red "  [✘] 找不到证书公钥 (Cert): $cert_path"
+            yellow "  ▶ 报错原因排查:"
+            yellow "     1. [API 错误] Cloudflare Token/Key 填错，或权限不足。"
+            yellow "     2. [DNS 未生效] 刚买的域名解析还没生效，导致 Acme.sh 无法验证。"
+            yellow "     3. [频率限制] 短时间内频繁重装，触发了 Let's Encrypt 的风控机制。"
+            yellow "     4. [路径拼写] 如果您选了自定义路径，可能是手误打错了绝对路径。"
+            has_error=1
+        elif [[ ! -s "$cert_path" ]]; then
+            red "  [✘] 证书公钥 (Cert) 大小为 0 字节！"
+            yellow "  ▶ 报错原因: Acme.sh 申请过程中被强制杀掉进程，或您的 VPS 磁盘空间已爆满。"
+            has_error=1
+        elif ! grep -q "BEGIN" "$cert_path"; then
+            red "  [✘] 证书公钥 (Cert) 格式异常！"
+            yellow "  ▶ 报错原因: 文件内容损坏，不是标准的 PEM 格式。可能被其他程序覆写。"
+            has_error=1
+        else
+            green "  [✔] 公钥 (Cert) 基础状态正常: $cert_path"
+        fi
+
+        # 诊断私钥 (Key)
+        if [[ ! -f "$key_path" ]]; then
+            red "  [✘] 找不到证书私钥 (Key): $key_path"
+            yellow "  ▶ 报错原因: 私钥生成失败，同上请检查 API 和 DNS 状态。"
+            has_error=1
+        elif [[ ! -s "$key_path" ]]; then
+            red "  [✘] 证书私钥 (Key) 大小为 0 字节！"
+            yellow "  ▶ 报错原因: 系统在生成私钥时出错，可能是 VPS 熵池不足或磁盘已满。"
+            has_error=1
+        elif ! grep -q "PRIVATE KEY" "$key_path"; then
+            red "  [✘] 证书私钥 (Key) 格式异常！"
+            yellow "  ▶ 报错原因: 文件不是合法的私钥文件，请检查是否混入了其他文本。"
+            has_error=1
+        else
+            green "  [✔] 私钥 (Key) 基础状态正常: $key_path"
+        fi
+    fi
+
+    echo ""
+
+    # ==========================================
+    # 2. 如果文件正常，进行密码学级别的匹配与过期诊断
+    # ==========================================
+    if [[ $has_error -eq 0 ]]; then
         if command -v openssl >/dev/null; then
             local cert_subject=$(openssl x509 -in "$cert_path" -noout -subject | awk -F'CN = |CN=' '{print $2}' | awk -F',' '{print $1}')
             local cert_issuer=$(openssl x509 -in "$cert_path" -noout -issuer | awk -F'CN = |CN=|O = |O=' '{print $2}' | awk -F',' '{print $1}')
             local cert_start=$(openssl x509 -in "$cert_path" -noout -startdate | cut -d= -f2)
             local cert_end=$(openssl x509 -in "$cert_path" -noout -enddate | cut -d= -f2)
-            
+            local cert_algo=$(openssl x509 -in "$cert_path" -noout -text | grep "Public Key Algorithm" | awk -F':' '{print $2}' | tr -d ' ')
+
             yellow "  ▶ 绑定的域名 (CN) : ${cert_subject:-未知}"
             yellow "  ▶ 证书颁发机构    : ${cert_issuer:-未知}"
+            yellow "  ▶ 密钥加密算法    : ${cert_algo:-未知}"
             yellow "  ▶ 证书生效日期    : $cert_start"
-            
-            local end_epoch=$(date -d "$cert_end" +%s)
-            local now_epoch=$(date +%s)
-            if [[ -n "$end_epoch" && -n "$now_epoch" && "$end_epoch" =~ ^[0-9]+$ ]]; then
-                local days_left=$(( (end_epoch - now_epoch) / 86400 ))
+
+            # 跨平台高精度时间计算
+            if command -v python3 >/dev/null; then
+                local days_left=$(python3 -c "import datetime; t=datetime.datetime.strptime('$cert_end', '%b %d %H:%M:%S %Y %Z'); print((t - datetime.datetime.now()).days)" 2>/dev/null)
+            else
+                local end_epoch=$(date -d "$cert_end" +%s 2>/dev/null)
+                local now_epoch=$(date +%s 2>/dev/null)
+                if [[ -n "$end_epoch" && -n "$now_epoch" && "$end_epoch" =~ ^[0-9]+$ ]]; then
+                    local days_left=$(( (end_epoch - now_epoch) / 86400 ))
+                fi
+            fi
+
+            if [[ -n "$days_left" && "$days_left" =~ ^-?[0-9]+$ ]]; then
                 if [[ $days_left -lt 0 ]]; then
                     red "  ▶ 证书过期日期    : $cert_end (⚠ 已经过期！)"
+                    yellow "  ▶ 报错原因        : 证书已过期，Acme.sh 自动续期任务可能已失效。"
                 elif [[ $days_left -lt 15 ]]; then
                     red "  ▶ 证书过期日期    : $cert_end (⚠ 仅剩 $days_left 天，即将过期！)"
                 else
@@ -1341,17 +1401,51 @@ check_cert() {
             else
                 yellow "  ▶ 证书过期日期    : $cert_end"
             fi
-            
-            if [[ "$cert_subject" == "www.bing.com" ]]; then
+
+            # 密码学验证：检查 Cert 和 Key 是否成对
+            if openssl x509 -noout -modulus -in "$cert_path" 2>/dev/null | grep -q "Modulus"; then
+                # RSA 算法验证
+                local cert_mod=$(openssl x509 -noout -modulus -in "$cert_path" 2>/dev/null)
+                local key_mod=$(openssl rsa -noout -modulus -in "$key_path" 2>/dev/null)
+                if [[ "$cert_mod" == "$key_mod" && -n "$cert_mod" ]]; then
+                    green "  ▶ 证书与私钥匹配  : [✔] 完美配对 (RSA)"
+                else
+                    red "  ▶ 证书与私钥匹配  : [✘] 不匹配！"
+                    yellow "  ▶ 报错原因        : 现在的私钥解不开当前的公钥！可能是手动替换文件时只换了其中一个，或者生成时发生了错乱。"
+                fi
+            else
+                # ECC 算法验证
+                local cert_pub=$(openssl x509 -in "$cert_path" -pubkey -noout 2>/dev/null)
+                local key_pub=$(openssl pkey -in "$key_path" -pubout 2>/dev/null)
+                if [[ "$cert_pub" == "$key_pub" && -n "$cert_pub" ]]; then
+                    green "  ▶ 证书与私钥匹配  : [✔] 完美配对 (ECC)"
+                else
+                    red "  ▶ 证书与私钥匹配  : [✘] 不匹配！"
+                    yellow "  ▶ 报错原因        : ECC 公钥指纹与私钥不对应。必须保证 crt 和 key 是同一批次生成的。"
+                fi
+            fi
+
+            # 模式提示与 Acme 自检
+            if [[ "$cert_subject" == "www.bing.com" || "$cert_issuer" =~ "bing.com" ]]; then
                 echo ""
                 yellow "  ℹ 提示: 当前使用的是系统自动生成的【必应自签伪装证书】。"
-                yellow "  ⚠ 注意: 当前配置为 Insecure 模式，客户端将跳过证书验证。"
-            elif [[ "$cert_issuer" =~ "Let's Encrypt" || "$cert_issuer" =~ "ZeroSSL" || "$cert_issuer" =~ "Google" ]]; then
+            elif [[ "$cert_issuer" =~ "Let's Encrypt" || "$cert_issuer" =~ "ZeroSSL" || "$cert_issuer" =~ "Google" || "$cert_issuer" =~ "Cloudflare" ]]; then
                 echo ""
-                green "  ℹ 提示: 当前使用的是受信任的【真实域名证书】。"
+                green "  ℹ 提示: 当前使用的是受信任的【真实 CA 域名证书】。"
+                
+                if [[ -f "/root/.acme.sh/acme.sh" || -f "/root/ca.log" ]]; then
+                    echo ""
+                    purple "  [Acme.sh 守护进程自检]"
+                    if crontab -l 2>/dev/null | grep -q "acme.sh"; then
+                        green "  ▶ Cron 定时任务   : [✔] 正常运行中"
+                    else
+                        red "  ▶ Cron 定时任务   : [✘] 缺失！"
+                        yellow "  ▶ 报错原因        : 系统的 crontab 被清空或卸载了 cronie 组件，证书到期后将无法自动续期。"
+                    fi
+                fi
             fi
         else
-            red "  [警告] 系统未安装 openssl 组件，无法读取证书的详细内部信息。"
+            red "  [警告] 系统未安装 openssl 组件，跳过了深度密码学检测。"
         fi
     fi
     
