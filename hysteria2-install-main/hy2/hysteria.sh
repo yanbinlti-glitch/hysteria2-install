@@ -317,27 +317,27 @@ inst_jump(){
 }
 
 inst_sub_port(){
-    read -p "设置 HTTPS 订阅服务端口 [1024-65535]（回车则随机分配）：" sub_port_input
+    read -p "设置订阅服务端口 [1024-65535]（回车则随机分配）：" sub_port_input
     [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 10000-30000 -n 1)
     
     while [[ ! "$sub_port_input" =~ ^[0-9]+$ ]] || [[ "$sub_port_input" -lt 1024 ]] || [[ "$sub_port_input" -gt 65535 ]]; do
         red "⚠️ 端口必须是 1024-65535 之间的纯数字！(1024以下为特权端口，nobody用户无权绑定)"
-        read -p "请重新设置 HTTPS 订阅服务端口 [1024-65535]：" sub_port_input
+        read -p "请重新设置订阅服务端口 [1024-65535]：" sub_port_input
         [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 10000-30000 -n 1)
     done
     
     while ss -tnl | grep -q ":$sub_port_input\b"; do
         echo -e "${RED} $sub_port_input ${PLAIN} 端口已经被占用，请更换端口重试！"
-        read -p "设置 HTTPS 订阅服务端口 [1024-65535]（回车则随机分配）：" sub_port_input
+        read -p "设置订阅服务端口 [1024-65535]（回车则随机分配）：" sub_port_input
         [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 10000-30000 -n 1)
         
         while [[ ! "$sub_port_input" =~ ^[0-9]+$ ]] || [[ "$sub_port_input" -lt 1024 ]] || [[ "$sub_port_input" -gt 65535 ]]; do
             red "⚠️ 端口必须是 1024-65535 之间的纯数字！"
-            read -p "请重新设置 HTTPS 订阅服务端口 [1024-65535]：" sub_port_input
+            read -p "请重新设置订阅服务端口 [1024-65535]：" sub_port_input
             [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 10000-30000 -n 1)
         done
     done
-    yellow "HTTPS 订阅服务将使用的端口是：$sub_port_input"
+    yellow "订阅服务将使用的端口是：$sub_port_input"
 }
 
 inst_pwd(){
@@ -411,10 +411,8 @@ generate_client_configs() {
     local clash_cert_verify="true"
     if [[ "$is_insecure_url" == "0" ]]; then
         clash_cert_verify="false"
-        # 记录真实域名用于生成 HTTPS 订阅
         echo "$c_domain" > /etc/hysteria/sub_host.txt
     else
-        # 记录真实 IP 用于生成 HTTPS 订阅
         echo "$ip" > /etc/hysteria/sub_host.txt
     fi
 
@@ -488,13 +486,13 @@ EOF
     local sub_port=$sub_port_input
     echo "$sub_port" > /etc/hysteria/sub_port.txt
 
-    # 准备 Python 的 SSL 证书 (复制并降低权限，确保 nobody 可读且不暴露核心密钥)
-    local sub_cert_dir="/etc/hysteria/sub_certs"
+    # 修复证书读取权限：存放在 web_dir 目录下以确保 nobody 权限可用
+    local sub_cert_dir="$web_dir/certs"
     mkdir -p "$sub_cert_dir"
-    cp "$cert_path" "$sub_cert_dir/cert.crt" 2>/dev/null || cp /etc/hysteria/cert.crt "$sub_cert_dir/cert.crt"
-    cp "$key_path" "$sub_cert_dir/private.key" 2>/dev/null || cp /etc/hysteria/private.key "$sub_cert_dir/private.key"
-    chown -R nobody "$sub_cert_dir"
-    chmod 400 "$sub_cert_dir/private.key"
+    cp "$cert_path" "$sub_cert_dir/cert.crt" 2>/dev/null || cp /etc/hysteria/cert.crt "$sub_cert_dir/cert.crt" 2>/dev/null
+    cp "$key_path" "$sub_cert_dir/private.key" 2>/dev/null || cp /etc/hysteria/private.key "$sub_cert_dir/private.key" 2>/dev/null
+    chown -R nobody "$sub_cert_dir" 2>/dev/null
+    chmod 400 "$sub_cert_dir/private.key" 2>/dev/null
     
     cat << EOF > "$web_dir/server.py"
 import http.server
@@ -509,7 +507,6 @@ KEY_FILE = "$sub_cert_dir/private.key"
 
 class SmartSubHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
-        # 强制安全校验：仅允许访问恰好匹配 UUID 的路径
         if self.path.strip('/') == SUB_UUID:
             ua = self.headers.get('User-Agent', '').lower()
             if 'clash' in ua or 'meta' in ua or 'verge' in ua or 'stash' in ua:
@@ -524,8 +521,8 @@ class SmartSubHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(b"<h1 style='text-align:center;margin-top:20%;'>403 Forbidden</h1>")
 
 with socketserver.TCPServer(("", PORT), SmartSubHandler) as httpd:
-    # 挂载 SSL/TLS 环境
-    if os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
+    # 智能降级机制：仅当使用真实域名时启用 HTTPS 包装
+    if "${is_insecure_url}" == "0" and os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(certfile=CERT_FILE, keyfile=KEY_FILE)
         httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
@@ -541,7 +538,7 @@ EOF
     if [[ $SYSTEM == "Alpine" ]]; then
         cat << EOF > /etc/init.d/hysteria-sub
 #!/sbin/openrc-run
-description="Hysteria HTTPS Subscription Server"
+description="Hysteria Subscription Server"
 command="${py_path}"
 command_args="${web_dir}/server.py"
 command_background=true
@@ -554,7 +551,7 @@ EOF
     else
         cat << EOF > /etc/systemd/system/hysteria-sub.service
 [Unit]
-Description=Hysteria HTTPS Subscription Server
+Description=Hysteria Subscription Server
 After=network.target
 
 [Service]
@@ -575,7 +572,7 @@ EOF
     svc_stop hysteria-sub || true
     svc_start hysteria-sub
     
-    green "智能 HTTPS 加密订阅服务已通过系统守护进程启动，并开启了路径安全保护..."
+    green "智能订阅服务已通过系统守护进程启动，并已开启路径安全保护与自适应证书配置..."
 }
 
 showconf(){
@@ -586,13 +583,18 @@ showconf(){
     local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null)
     local sub_path=$(cat /etc/hysteria/sub_path.txt 2>/dev/null)
     local sub_host=$(cat /etc/hysteria/sub_host.txt 2>/dev/null)
+    local is_insecure=$(cat /etc/hysteria/insecure_state.txt 2>/dev/null)
     [[ -z "$sub_host" ]] && sub_host=$ip
+    
+    # 根据是否是自签证书智能判断链接协议
+    local protocol="https"
+    [[ "$is_insecure" == "1" ]] && protocol="http"
     
     local sub_url=""
     if [[ -n $(echo "$sub_host" | grep ":") ]]; then
-        sub_url="https://[${sub_host}]:${sub_port}/${sub_path}"
+        sub_url="${protocol}://[${sub_host}]:${sub_port}/${sub_path}"
     else
-        sub_url="https://${sub_host}:${sub_port}/${sub_path}"
+        sub_url="${protocol}://${sub_host}:${sub_port}/${sub_path}"
     fi
 
     local web_dir="/var/www/hysteria"
@@ -609,6 +611,24 @@ showconf(){
     echo -e "   链接：${RED}${raw_url}${PLAIN}"
     echo ""
     yellow "================ 📱 手机扫码直连节点 ========================"
+    
+    if ! command -v qrencode &> /dev/null; then
+        yellow "⏳ 检测到缺失二维码生成组件 (qrencode)，正在尝试为您自动补全..."
+        if [[ ! $SYSTEM == "CentOS" ]]; then
+            ${PACKAGE_UPDATE[int]} >/dev/null 2>&1
+        fi
+        if [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" ]]; then
+            ${PACKAGE_INSTALL[int]} epel-release >/dev/null 2>&1
+        fi
+        ${PACKAGE_INSTALL[int]} qrencode >/dev/null 2>&1
+        
+        if command -v qrencode &> /dev/null; then
+            green "✨ qrencode 组件安装成功！"
+        else
+            red "⚠️ 自动安装 qrencode 失败，将跳过二维码生成。请稍后尝试手动安装。"
+        fi
+    fi
+
     if command -v qrencode >/dev/null; then
         echo -e "💡 ${YELLOW}提示：如果下方二维码显示带有断层或横纹，请在 SSH 客户端中将字体缩小，或确保行间距设置为 1.0${PLAIN}"
         echo ""
@@ -621,7 +641,11 @@ showconf(){
     yellow "使用说明："
     yellow " 1. 扫码功能：请打开 Shadowrocket / v2rayNG 的扫一扫功能直接扫描上方二维码。"
     yellow " 2. 智能订阅：自动识别客户端 UA！填入 Clash 自动获取 YAML，填入 v2rayN 获取 Base64！"
-    yellow " 3. 安全加密：您的订阅服务已全面升级为 HTTPS 加密防嗅探机制，请放心更新节点。"
+    if [[ "$is_insecure" == "1" ]]; then
+        yellow " 3. 当前为自建伪装证书，为了保证各客户端兼容拉取配置，订阅链接已智能匹配为 HTTP 协议。"
+    else
+        yellow " 3. 安全加密：您的订阅服务已全面升级为 HTTPS 加密防嗅探机制，请放心更新节点。"
+    fi
     echo ""
     read -p "按回车键返回主菜单..."
     menu
@@ -863,9 +887,9 @@ EOF
     generate_client_configs
     
     red "======================================================================"
-    green "Hysteria 2 代理及 HTTPS 订阅服务安装完成"
+    green "Hysteria 2 代理及智能订阅服务安装完成"
     echo ""
-    green "请在主菜单选择 [4] 查看您的安全订阅链接与二维码。"
+    green "请在主菜单选择 [4] 查看您的订阅链接与二维码。"
     sleep 3
     menu
 }
