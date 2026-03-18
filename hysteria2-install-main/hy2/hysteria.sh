@@ -748,8 +748,8 @@ EOF
         svc_start hysteria-server
         sleep 2
     else
-        # 提取已存在的端口
-        local api_port=$(grep -oP '(?<=listen: 127\.0\.0\.1:)\d+' /etc/hysteria/config.yaml)
+        # 提取已存在的端口 (修复 Alpine/BusyBox 的 grep -P 兼容性)
+        local api_port=$(grep 'listen: 127.0.0.1:' /etc/hysteria/config.yaml | grep -oE '[0-9]+$')
         [[ -z "$api_port" ]] && api_port=$(cat /etc/hysteria/api_port.txt 2>/dev/null)
     fi
 
