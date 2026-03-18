@@ -280,7 +280,7 @@ inst_cert() {
         fi
     elif [[ $certInput == 3 ]]; then
         echo ""
-        # [修复 Bug 2] 增加自定义证书非空及存在性校验
+        # 修复 Bug: 增加自定义证书非空及存在性校验
         while true; do
             echo -en " ${LIGHT_YELLOW} ▶ 请输入公钥(crt)的绝对路径: ${PLAIN}"
             read cert_path
@@ -398,7 +398,7 @@ inst_sub_port(){
     green " 订阅端口已设置为: $sub_port_input"
     open_port $sub_port_input "tcp"
     
-    # [修复 Bug 1] 将生成的端口信息写入文件，供后续 Python 订阅服务调用
+    # 修复 Bug: 将生成的端口信息写入文件，供后续 Python 订阅服务调用
     mkdir -p /etc/hysteria
     echo "$sub_port_input" > /etc/hysteria/sub_port.txt
 }
@@ -788,7 +788,7 @@ EOF
     purple "  请在主菜单选择 [5] 获取节点与二维码。"
     echo ""
     sleep 3
-    # [修复 Bug 3] 移除这里的 menu 调用，直接通过外层 while 循环返回
+    # 修复 Bug: 移除这里的 menu 调用，直接通过外层 while 循环返回
 }
 
 unsthysteria() {
@@ -905,7 +905,7 @@ showconf() {
     echo ""
     echo -en " ${LIGHT_YELLOW} ▶ 按回车键返回主菜单... ${PLAIN}"
     read temp
-    # [修复 Bug 3] 移除递归 menu
+    # 修复 Bug: 移除递归 menu
 }
 
 edit_config() {
@@ -1097,6 +1097,7 @@ menu() {
     echo -e "${LIGHT_GREEN}  ╚═════╝   ╚══════╝  ╚═════╝ ╚══════╝ ╚═╝  ╚═╝${PLAIN}"
     green "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
     green " 项目名称 ：Hysteria 2 一键部署与管理脚本 (极致优化版)"
+    purple " 项目地址 ：哆啦的Github库 https://github.com/yanbinlti-glitch"
     green "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
     yellow " 脚本快捷方式：hy2 (需自行设置别名，如无则直接运行脚本)"
     red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
@@ -1128,7 +1129,7 @@ menu() {
     esac
 }
 
-# [修复 Bug 3] 引入 while 死循环进行菜单轮询，完美避免堆栈溢出
+# 引入 while 死循环进行菜单轮询，完美避免堆栈溢出
 while true; do
     menu
 done
