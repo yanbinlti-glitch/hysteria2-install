@@ -33,17 +33,23 @@ for i in "${CMD[@]}"; do
     SYS="$i" && [[ -n $SYS ]] && break
 done
 
+# 修复变量泄漏问题：将包管理器命令显式赋值给独立变量
 for ((int = 0; int < ${#REGEX[@]}; int++)); do
-    [[ $(echo "$SYS" | tr '[:upper:]' '[:lower:]') =~ ${REGEX[int]} ]] && SYSTEM="${RELEASE[int]}" && [[ -n $SYSTEM ]] && break
+    if [[ $(echo "$SYS" | tr '[:upper:]' '[:lower:]') =~ ${REGEX[int]} ]]; then
+        SYSTEM="${RELEASE[int]}"
+        PKG_UPDATE="${PACKAGE_UPDATE[int]}"
+        PKG_INSTALL="${PACKAGE_INSTALL[int]}"
+        [[ -n $SYSTEM ]] && break
+    fi
 done
 
 [[ -z $SYSTEM ]] && red "目前暂不支持你的VPS的操作系统！" && exit 1
 
 if [[ -z $(type -P curl) ]]; then
     if [[ ! $SYSTEM == "CentOS" ]]; then
-        ${PACKAGE_UPDATE[int]}
+        $PKG_UPDATE
     fi
-    ${PACKAGE_INSTALL[int]} curl
+    $PKG_INSTALL curl
 fi
 
 # ================= 兼容 OpenRC 和 Systemd 的服务控制 =================
@@ -114,21 +120,21 @@ check_env() {
         yellow " ⏳ 发现缺失前置组件，正在为您自动拉取安装，请稍候..."
         
         if [[ ! $SYSTEM == "CentOS" ]]; then
-            ${PACKAGE_UPDATE[int]}
+            $PKG_UPDATE
         fi
         
         if [[ $SYSTEM == "Alpine" ]]; then
-            ${PACKAGE_INSTALL[int]} curl wget sudo procps iptables ip6tables iproute2 python3 openssl socat cronie qrencode
+            $PKG_INSTALL curl wget sudo procps iptables ip6tables iproute2 python3 openssl socat cronie qrencode
             svc_start crond
             svc_enable crond
         elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" || $SYSTEM == "Alma" || $SYSTEM == "Rocky" ]]; then
-            ${PACKAGE_INSTALL[int]} epel-release || true
-            ${PACKAGE_INSTALL[int]} curl wget sudo procps iptables iptables-services iproute python3 openssl socat cronie qrencode
+            $PKG_INSTALL epel-release || true
+            $PKG_INSTALL curl wget sudo procps iptables iptables-services iproute python3 openssl socat cronie qrencode
             svc_start crond
             svc_enable crond
         else
             export DEBIAN_FRONTEND=noninteractive
-            ${PACKAGE_INSTALL[int]} curl wget sudo procps iptables-persistent netfilter-persistent iproute2 python3 openssl socat cron qrencode
+            $PKG_INSTALL curl wget sudo procps iptables-persistent netfilter-persistent iproute2 python3 openssl socat cron qrencode
             svc_start cron
             svc_enable cron
         fi
@@ -145,9 +151,10 @@ check_env() {
 }
 
 realip(){
-    ip=$(curl -s4m8 ip.sb -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1 || curl -s4m8 ifconfig.me -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1)
+    # 缩短超时时间为 3 秒，避免纯 IPv6 机器卡死过久
+    ip=$(curl -s4m3 ip.sb -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1 || curl -s4m3 ifconfig.me -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1)
     if [[ -z "$ip" ]]; then
-        ip=$(curl -s6m8 ip.sb -k || curl -s6m8 ifconfig.me -k)
+        ip=$(curl -s6m3 ip.sb -k || curl -s6m3 ifconfig.me -k)
     fi
 }
 
@@ -497,6 +504,7 @@ EOF
     chown -R nobody "$sub_cert_dir" 2>/dev/null
     chmod 400 "$sub_cert_dir/private.key" 2>/dev/null
     
+    # 启用防窥探安全服务端机制
     cat << EOF > "$web_dir/server.py"
 import http.server
 import socketserver
@@ -509,26 +517,45 @@ SUB_UUID = "$sub_uuid"
 CERT_FILE = "$sub_cert_dir/cert.crt"
 KEY_FILE = "$sub_cert_dir/private.key"
 
-class SmartSubHandler(http.server.SimpleHTTPRequestHandler):
+# 启动时预加载配置到内存，不暴露真实文件系统路径
+try:
+    with open("$web_dir/$sub_uuid/clash-meta-sub.yaml", 'rb') as f:
+        CLASH_DATA = f.read()
+    with open("$web_dir/$sub_uuid/sub_b64.txt", 'rb') as f:
+        B64_DATA = f.read()
+except FileNotFoundError:
+    CLASH_DATA = b""
+    B64_DATA = b""
+
+class SecureSubHandler(http.server.BaseHTTPRequestHandler):
+    server_version = "nginx/1.24.0" # 伪装 Server 响应头
+    sys_version = ""
+
     def do_GET(self):
-        # 核心修复点：使用 urllib 解析剥离问号及后缀参数，防止客户端请求引发 403 拦截
         parsed = urllib.parse.urlparse(self.path)
         req_path = parsed.path.strip('/')
         
+        # 仅当 UUID 完全匹配时才放行，彻底免疫 ../ 目录穿越攻击
         if req_path == SUB_UUID:
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain; charset=utf-8')
+            # 禁用缓存，防止中间链路/CDN/运营商嗅探并缓存配置
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.end_headers()
+            
             ua = self.headers.get('User-Agent', '').lower()
-            if 'clash' in ua or 'meta' in ua or 'verge' in ua or 'stash' in ua:
-                self.path = f"/{SUB_UUID}/clash-meta-sub.yaml"
+            if any(x in ua for x in ['clash', 'meta', 'verge', 'stash', 'mihomo']):
+                self.wfile.write(CLASH_DATA)
             else:
-                self.path = f"/{SUB_UUID}/sub_b64.txt"
-            return super().do_GET()
+                self.wfile.write(B64_DATA)
         else:
+            # 扫描器和非法访问将收到伪造的标准 Nginx 403 页面
             self.send_response(403)
             self.send_header('Content-type', 'text/html; charset=utf-8')
             self.end_headers()
-            self.wfile.write(b"<h1 style='text-align:center;margin-top:20%;'>403 Forbidden</h1>")
+            self.wfile.write(b"<html><head><title>403 Forbidden</title></head><body><center><h1>403 Forbidden</h1></center><hr><center>nginx</center></body></html>")
 
-with socketserver.TCPServer(("", PORT), SmartSubHandler) as httpd:
+with socketserver.TCPServer(("", PORT), SecureSubHandler) as httpd:
     if "${is_insecure_url}" == "0" and os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(certfile=CERT_FILE, keyfile=KEY_FILE)
@@ -587,9 +614,9 @@ EOF
 }
 
 showconf(){
-    local ip=$(curl -s4m8 ip.sb -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1 || curl -s4m8 ifconfig.me -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1)
+    local ip=$(curl -s4m3 ip.sb -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1 || curl -s4m3 ifconfig.me -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1)
     if [[ -z "$ip" ]]; then
-        ip=$(curl -s6m8 ip.sb -k || curl -s6m8 ifconfig.me -k)
+        ip=$(curl -s6m3 ip.sb -k || curl -s6m3 ifconfig.me -k)
     fi
     local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null)
     local sub_path=$(cat /etc/hysteria/sub_path.txt 2>/dev/null)
@@ -702,9 +729,9 @@ check_traffic() {
         return
     fi
     
-    local api_port=$(cat /etc/hysteria/api_port.txt 2>/dev/null)
-    if [[ -z "$api_port" ]]; then
-        api_port=$(shuf -i 30000-60000 -n 1)
+    # 修复 YAML 重复写入的漏洞
+    if ! grep -q "^trafficStats:" /etc/hysteria/config.yaml; then
+        local api_port=$(shuf -i 30000-60000 -n 1)
         while ss -tnl | grep -q ":$api_port\b"; do
             api_port=$(shuf -i 30000-60000 -n 1)
         done
@@ -719,6 +746,10 @@ EOF
         svc_stop hysteria-server
         svc_start hysteria-server
         sleep 2
+    else
+        # 提取已存在的端口
+        local api_port=$(grep -oP '(?<=listen: 127\.0\.0\.1:)\d+' /etc/hysteria/config.yaml)
+        [[ -z "$api_port" ]] && api_port=$(cat /etc/hysteria/api_port.txt 2>/dev/null)
     fi
 
     local traffic_data=$(curl -s "http://127.0.0.1:$api_port/traffic")
@@ -733,7 +764,6 @@ EOF
     else
         echo ""
         green "================ 🚀 客户端连接与流量统计 =================="
-        
         local client_count=$(echo "$traffic_data" | grep -o '"[^"]*":{[^}]*}' | grep -c '"tx"')
         yellow "活跃客户端 (产生流量记录) 总数: $client_count"
         echo "--------------------------------------------------------"
@@ -908,17 +938,25 @@ unsthysteria(){
     local main_port=$(grep '^listen:' /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ')
     local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null)
 
+    # 安全地清理系统防火墙规则
     if [[ -n "$main_port" && "$main_port" =~ ^[0-9]+$ ]]; then
-        iptables -D INPUT -p udp --dport $main_port -j ACCEPT || true
-        ip6tables -D INPUT -p udp --dport $main_port -j ACCEPT || true
-        iptables-save | grep -v "DNAT --to-destination :$main_port" | iptables-restore || true
-        ip6tables-save | grep -v "DNAT --to-destination :$main_port" | ip6tables-restore || true
+        iptables -D INPUT -p udp --dport $main_port -j ACCEPT 2>/dev/null || true
+        ip6tables -D INPUT -p udp --dport $main_port -j ACCEPT 2>/dev/null || true
+        
+        iptables-save -t nat | grep "DNAT --to-destination :$main_port" | sed 's/^-A /-D /' | while read -r rule; do
+            iptables -t nat $rule 2>/dev/null || true
+        done
+        ip6tables-save -t nat | grep "DNAT --to-destination :$main_port" | sed 's/^-A /-D /' | while read -r rule; do
+            ip6tables -t nat $rule 2>/dev/null || true
+        done
+
         if command -v ufw >/dev/null 2>&1; then ufw delete allow $main_port/udp >/dev/null 2>&1 || true; fi
         if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --zone=public --remove-port=$main_port/udp --permanent >/dev/null 2>&1 || true; firewall-cmd --reload >/dev/null 2>&1 || true; fi
-        yellow "提示：与主端口相关的网络规则已被自动清理。"
+        yellow "提示：与主端口相关的网络规则已被安全清理。"
     fi
+    
     if [[ -n "$sub_port" && "$sub_port" =~ ^[0-9]+$ ]]; then
-        iptables -D INPUT -p tcp --dport $sub_port -j ACCEPT || true
+        iptables -D INPUT -p tcp --dport $sub_port -j ACCEPT 2>/dev/null || true
         if command -v ufw >/dev/null 2>&1; then ufw delete allow $sub_port/tcp >/dev/null 2>&1 || true; fi
         if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --zone=public --remove-port=$sub_port/tcp --permanent >/dev/null 2>&1 || true; firewall-cmd --reload >/dev/null 2>&1 || true; fi
     fi
@@ -937,7 +975,6 @@ unsthysteria(){
     save_iptables
 
     rm -rf /usr/local/bin/hysteria /etc/hysteria /var/www/hysteria
-    rm -f "$0"
 
     green "Hysteria 2 服务及相关文件、端口规则已彻底卸载清理完成！"
     sleep 2
