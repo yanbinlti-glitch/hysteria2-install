@@ -183,6 +183,12 @@ check_env() {
             svc_start crond; svc_enable crond
         else
             export DEBIAN_FRONTEND=noninteractive
+            # ================= [新增依赖修复逻辑] =================
+            yellow "  正在尝试修复并清理系统损坏的依赖项..."
+            apt-get --fix-broken install -y
+            apt-get autoremove -y
+            apt-get clean
+            # ======================================================
             $PKG_INSTALL curl wget sudo procps iptables-persistent netfilter-persistent iproute2 python3 openssl socat cron qrencode
             svc_start cron; svc_enable cron
         fi
