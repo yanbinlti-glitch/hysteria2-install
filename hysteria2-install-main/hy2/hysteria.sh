@@ -70,41 +70,41 @@ realip() {
     fi
 }
 
-# 随机高强度字符生成 (兼容 Alpine)
+# 随机高强度字符生成
 gen_random_str() {
     local len=$1
     cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -d '-' | cut -c 1-$len || head -c 16 /dev/urandom | od -A n -t x1 | tr -d ' \n' | cut -c 1-$len
 }
 
 # =================================================================
-#  3. 服务管理与防火墙控制封装 (日志已全开)
+#  3. 服务管理与防火墙控制封装 (完全暴露执行日志)
 # =================================================================
-svc_start()   { if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" start || true; else systemctl start "$1" || true; fi; }
-svc_stop()    { if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" stop || true; else systemctl stop "$1" || true; fi; }
-svc_enable()  { if [[ $SYSTEM == "Alpine" ]]; then rc-update add "$1" default || true; else systemctl enable "$1" || true; fi; }
-svc_disable() { if [[ $SYSTEM == "Alpine" ]]; then rc-update del "$1" default || true; else systemctl disable "$1" || true; fi; }
+svc_start()   { if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" start; else systemctl start "$1"; fi; }
+svc_stop()    { if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" stop; else systemctl stop "$1"; fi; }
+svc_enable()  { if [[ $SYSTEM == "Alpine" ]]; then rc-update add "$1" default; else systemctl enable "$1"; fi; }
+svc_disable() { if [[ $SYSTEM == "Alpine" ]]; then rc-update del "$1" default; else systemctl disable "$1"; fi; }
 
 save_iptables() {
     if [[ $SYSTEM == "Alpine" ]]; then
-        rc-service iptables save || true
-        rc-service ip6tables save || true
+        rc-service iptables save
+        rc-service ip6tables save
     elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" ]]; then
-        service iptables save || true
-        service ip6tables save || true
+        service iptables save
+        service ip6tables save
     else
-        netfilter-persistent save || true
+        netfilter-persistent save
     fi
 }
 
 open_port() {
     local port=$1
     local proto=$2
-    iptables -I INPUT -p $proto --dport $port -j ACCEPT || true
-    ip6tables -I INPUT -p $proto --dport $port -j ACCEPT || true
-    if command -v ufw >/dev/null 2>&1; then ufw allow $port/$proto || true; fi
+    iptables -I INPUT -p $proto --dport $port -j ACCEPT
+    ip6tables -I INPUT -p $proto --dport $port -j ACCEPT
+    if command -v ufw >/dev/null 2>&1; then ufw allow $port/$proto; fi
     if command -v firewall-cmd >/dev/null 2>&1; then
-        firewall-cmd --zone=public --add-port=$port/$proto --permanent || true
-        firewall-cmd --reload || true
+        firewall-cmd --zone=public --add-port=$port/$proto --permanent
+        firewall-cmd --reload
     fi
     save_iptables
 }
@@ -112,12 +112,12 @@ open_port() {
 close_port() {
     local port=$1
     local proto=$2
-    iptables -D INPUT -p $proto --dport $port -j ACCEPT || true
-    ip6tables -D INPUT -p $proto --dport $port -j ACCEPT || true
-    if command -v ufw >/dev/null 2>&1; then ufw delete allow $port/$proto || true; fi
+    iptables -D INPUT -p $proto --dport $port -j ACCEPT
+    ip6tables -D INPUT -p $proto --dport $port -j ACCEPT
+    if command -v ufw >/dev/null 2>&1; then ufw delete allow $port/$proto; fi
     if command -v firewall-cmd >/dev/null 2>&1; then
-        firewall-cmd --zone=public --remove-port=$port/$proto --permanent || true
-        firewall-cmd --reload || true
+        firewall-cmd --zone=public --remove-port=$port/$proto --permanent
+        firewall-cmd --reload
     fi
     save_iptables
 }
@@ -176,7 +176,7 @@ check_env() {
             $PKG_INSTALL curl wget sudo procps iptables ip6tables iproute2 python3 openssl socat cronie libqrencode-tools
             svc_start crond; svc_enable crond
         elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" || $SYSTEM == "Alma" || $SYSTEM == "Rocky" ]]; then
-            $PKG_INSTALL epel-release || true
+            $PKG_INSTALL epel-release
             $PKG_INSTALL curl wget sudo procps iptables iptables-services iproute python3 openssl socat cronie qrencode
             svc_start crond; svc_enable crond
         else
@@ -229,7 +229,6 @@ inst_cert() {
             [[ -z $domain ]] && red " 未输入域名，无法执行操作！" && exit 1
             green " 已记录域名：$domain"
             
-            # 兼容 IPv4 和 IPv6 解析，增加容错
             domainIP=$(python3 -c "import socket; print(socket.getaddrinfo('${domain}', None)[0][4][0])" 2>/dev/null || echo "")
             
             if [[ -z "$domainIP" ]]; then
@@ -282,12 +281,14 @@ inst_cert() {
             yellow " 正在通过 DNS API 验证所有权，请留意下方执行日志 (约1-3分钟)..."
             bash /root/.acme.sh/acme.sh --issue --dns dns_cf -d ${domain} -k ec-256
             
-            # 提前创建目录，防止 cp 报错
             mkdir -p /var/www/hysteria/certs
 
-            # 重启命令加入复制证书逻辑和修正权限
-            local reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && chown -R nobody /var/www/hysteria/certs && systemctl restart hysteria-server && systemctl restart hysteria-sub"
-            [[ $SYSTEM == "Alpine" ]] && reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && chown -R nobody /var/www/hysteria/certs && rc-service hysteria-server restart && rc-service hysteria-sub restart"
+            # 修复 Bug: 初装时由于服务尚未建立，盲目 restart 会报错。改为条件性重启
+            if [[ $SYSTEM == "Alpine" ]]; then
+                local reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && chown -R nobody /var/www/hysteria/certs && if rc-service hysteria-server status | grep -q 'started'; then rc-service hysteria-server restart; fi && if rc-service hysteria-sub status | grep -q 'started'; then rc-service hysteria-sub restart; fi"
+            else
+                local reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && chown -R nobody /var/www/hysteria/certs && if systemctl is-active --quiet hysteria-server; then systemctl restart hysteria-server; fi && if systemctl is-active --quiet hysteria-sub; then systemctl restart hysteria-sub; fi"
+            fi
             
             bash /root/.acme.sh/acme.sh --install-cert -d ${domain} --key-file /root/private.key --fullchain-file /root/cert.crt --ecc --reloadcmd "$reload_cmd"
             
@@ -384,14 +385,13 @@ inst_port() {
         done
         green " 已开启端口跳跃范围: $firstport - $endport"
 
-        modprobe ip6table_nat || true
-        # 修复路由迷失问题，使用 REDIRECT 代替 DNAT
+        modprobe ip6table_nat
         iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop"
-        ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop" || true
-        if command -v ufw >/dev/null 2>&1; then ufw allow $firstport:$endport/udp || true; fi
+        ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop"
+        if command -v ufw >/dev/null 2>&1; then ufw allow $firstport:$endport/udp; fi
         if command -v firewall-cmd >/dev/null 2>&1; then
-            firewall-cmd --zone=public --add-port=$firstport-$endport/udp --permanent || true
-            firewall-cmd --reload || true
+            firewall-cmd --zone=public --add-port=$firstport-$endport/udp --permanent
+            firewall-cmd --reload
         fi
         save_iptables
     fi
@@ -492,39 +492,39 @@ clean_env() {
     local main_port=$(grep '^listen:' /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ')
     local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null)
 
-    # 清理防火墙端口
-    [[ -n "$main_port" && "$main_port" =~ ^[0-9]+$ ]] && close_port $main_port "udp" >/dev/null 2>&1
-    [[ -n "$sub_port" && "$sub_port" =~ ^[0-9]+$ ]] && close_port $sub_port "tcp" >/dev/null 2>&1
+    # 暴露防火墙端口清理日志
+    [[ -n "$main_port" && "$main_port" =~ ^[0-9]+$ ]] && close_port $main_port "udp"
+    [[ -n "$sub_port" && "$sub_port" =~ ^[0-9]+$ ]] && close_port $sub_port "tcp"
 
-    # 清理端口跳跃规则
+    # 暴露跳跃端口清理日志
     iptables-save -t nat 2>/dev/null | grep "hy2-port-hop" | sed 's/^-A /-D /' | while read -r rule; do
-        iptables -t nat $rule || true
+        eval iptables -t nat $rule
     done
     ip6tables-save -t nat 2>/dev/null | grep "hy2-port-hop" | sed 's/^-A /-D /' | while read -r rule; do
-        ip6tables -t nat $rule || true
+        eval ip6tables -t nat $rule
     done
 
-    # 停止并禁用服务
-    svc_stop hysteria-server >/dev/null 2>&1; svc_disable hysteria-server >/dev/null 2>&1
-    svc_stop hysteria-sub >/dev/null 2>&1; svc_disable hysteria-sub >/dev/null 2>&1
+    # 暴露服务停止日志
+    svc_stop hysteria-server; svc_disable hysteria-server
+    svc_stop hysteria-sub; svc_disable hysteria-sub
 
     # 删除系统服务文件
     if [[ $SYSTEM == "Alpine" ]]; then
         rm -f /etc/init.d/hysteria-server /etc/init.d/hysteria-sub
     else
         rm -f /etc/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-sub.service
-        systemctl daemon-reload || true
+        systemctl daemon-reload
     fi
-    save_iptables >/dev/null 2>&1
+    save_iptables
 
     # 删除主程序和配置目录
     rm -rf /usr/local/bin/hysteria /etc/hysteria /var/www/hysteria
     
-    # 彻底卸载模式：删除证书和 acme 环境
+    # 彻底卸载模式：删除证书和 acme 环境并保留卸载日志
     if [[ "$mode" == "all" ]]; then
         rm -f /root/cert.crt /root/private.key /root/ca.log
         if [[ -d /root/.acme.sh ]]; then
-            /root/.acme.sh/acme.sh --uninstall >/dev/null 2>&1 || true
+            /root/.acme.sh/acme.sh --uninstall
             rm -rf /root/.acme.sh
         fi
     fi
@@ -621,10 +621,10 @@ EOF
     local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null)
     local sub_cert_dir="$web_dir/certs"
     mkdir -p "$sub_cert_dir"
-    cp "$cert_path" "$sub_cert_dir/cert.crt" 2>/dev/null || cp /etc/hysteria/cert.crt "$sub_cert_dir/cert.crt" 2>/dev/null
-    cp "$key_path" "$sub_cert_dir/private.key" 2>/dev/null || cp /etc/hysteria/private.key "$sub_cert_dir/private.key" 2>/dev/null
-    chown -R nobody "$sub_cert_dir" || true
-    chmod 400 "$sub_cert_dir/private.key" || true
+    cp "$cert_path" "$sub_cert_dir/cert.crt" 2>/dev/null || cp /etc/hysteria/cert.crt "$sub_cert_dir/cert.crt"
+    cp "$key_path" "$sub_cert_dir/private.key" 2>/dev/null || cp /etc/hysteria/private.key "$sub_cert_dir/private.key"
+    chown -R nobody "$sub_cert_dir"
+    chmod 400 "$sub_cert_dir/private.key"
     
     cat << EOF > "$web_dir/server.py"
 import http.server
@@ -681,7 +681,7 @@ with socketserver.TCPServer(("", PORT), SecureSubHandler) as httpd:
     httpd.serve_forever()
 EOF
 
-    chown -R nobody "$web_dir" || true
+    chown -R nobody "$web_dir"
     
     local py_path=$(command -v python3)
     if [[ $SYSTEM == "Alpine" ]]; then
@@ -885,7 +885,9 @@ showconf() {
     local sub_host=$(cat /etc/hysteria/sub_host.txt 2>/dev/null)
     local is_insecure=$(cat /etc/hysteria/insecure_state.txt 2>/dev/null)
     local main_port=$(grep '^listen:' /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ')
-    [[ -z "$sub_host" ]] && sub_host=$ip
+    
+    # 修复未获取到 IP 时的 fallback 逻辑
+    [[ -z "$sub_host" || "$sub_host" == "" ]] && sub_host=$ip
     
     local protocol="https"
     [[ "$is_insecure" == "1" ]] && protocol="http"
@@ -1035,11 +1037,13 @@ EOF
     if [[ -z "$traffic_data" || "$traffic_data" =~ "404" ]]; then
         red "  获取数据失败，Hysteria 服务可能未正常运行。"
     else
-        # Python 高级健壮性 JSON 解析
+        # 优化 Python JSON 解析容错，改用环境变量传入数据防止引号截断崩溃
+        export TRAFFIC_JSON_DATA="$traffic_data"
         python3 -c "
-import sys, json
+import os, json
 try:
-    data = json.loads('''$traffic_data''')
+    data_str = os.environ.get('TRAFFIC_JSON_DATA', '{}')
+    data = json.loads(data_str)
     if not data:
         print('\033[33m  暂无任何流量消耗记录或客户端连接。\033[0m')
     else:
