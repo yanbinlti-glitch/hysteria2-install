@@ -30,6 +30,12 @@ print_line() {
 # =================================================================
 [[ $EUID -ne 0 ]] && red " [错误] 请在 root 用户下运行此脚本！" && exit 1
 
+# 自动设置 hy2 快捷命令
+if [[ "$(realpath "$0" 2>/dev/null)" != "/usr/local/bin/hy2" ]]; then
+    cp -f "$0" /usr/local/bin/hy2
+    chmod +x /usr/local/bin/hy2
+fi
+
 REGEX=("alpine" "debian" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "'amazon linux'" "fedora")
 RELEASE=("Alpine" "Debian" "Ubuntu" "CentOS" "CentOS" "Fedora")
 PACKAGE_UPDATE=("apk update" "apt-get update" "apt-get update" "yum -y update" "yum -y update" "yum -y update")
@@ -56,11 +62,11 @@ if [[ -z $(type -P curl) ]]; then
     $PKG_INSTALL curl >/dev/null 2>&1
 fi
 
-# 获取公网真实IP
+# 获取公网真实IP (已增加备用接口，提高鲁棒性)
 realip() {
-    ip=$(curl -s4m3 ip.sb -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1 || curl -s4m3 ifconfig.me -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1)
+    ip=$(curl -s4m3 ip.sb -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1 || curl -s4m3 ifconfig.me -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1 || curl -s4m3 api.ipify.org -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1)
     if [[ -z "$ip" ]]; then
-        ip=$(curl -s6m3 ip.sb -k || curl -s6m3 ifconfig.me -k)
+        ip=$(curl -s6m3 ip.sb -k || curl -s6m3 ifconfig.me -k || curl -s6m3 api64.ipify.org -k)
     fi
 }
 
@@ -204,7 +210,7 @@ inst_cert() {
     if [[ $certInput == 2 ]]; then
         cert_path="/root/cert.crt"
         key_path="/root/private.key"
-        chmod a+x /root 
+        # 已移除高危的 chmod a+x /root 权限泄露
         if [[ -f /root/cert.crt && -f /root/private.key && -f /root/ca.log ]]; then
             domain=$(cat /root/ca.log)
             echo ""
@@ -280,7 +286,6 @@ inst_cert() {
         fi
     elif [[ $certInput == 3 ]]; then
         echo ""
-        # 修复 Bug: 增加自定义证书非空及存在性校验
         while true; do
             echo -en " ${LIGHT_YELLOW} ▶ 请输入公钥(crt)的绝对路径: ${PLAIN}"
             read cert_path
@@ -316,22 +321,23 @@ inst_cert() {
 inst_port() {
     echo ""
     print_line
+    # 已将随机端口范围优化为 10000-65535 避开常用保留端口
     echo -en " ${LIGHT_YELLOW} ▶ 设置 Hysteria 2 主端口 [1-65535] (回车随机): ${PLAIN}"
     read port
-    [[ -z $port ]] && port=$(shuf -i 2000-65535 -n 1)
+    [[ -z $port ]] && port=$(shuf -i 10000-65535 -n 1)
     
     while [[ ! "$port" =~ ^[0-9]+$ ]] || [[ "$port" -lt 1 ]] || [[ "$port" -gt 65535 ]]; do
         red " [警告] 端口必须是 1-65535 之间的纯数字！"
         echo -en " ${LIGHT_YELLOW} ▶ 重新设置主端口: ${PLAIN}"
         read port
-        [[ -z $port ]] && port=$(shuf -i 2000-65535 -n 1)
+        [[ -z $port ]] && port=$(shuf -i 10000-65535 -n 1)
     done
 
     while ss -unl | grep -q ":$port\b"; do
         red " [警告] 端口 $port 已被占用！"
         echo -en " ${LIGHT_YELLOW} ▶ 重新设置主端口: ${PLAIN}"
         read port
-        [[ -z $port ]] && port=$(shuf -i 2000-65535 -n 1)
+        [[ -z $port ]] && port=$(shuf -i 10000-65535 -n 1)
     done
     green " 节点主端口已设置为: $port"
     open_port $port "udp"
@@ -398,7 +404,6 @@ inst_sub_port(){
     green " 订阅端口已设置为: $sub_port_input"
     open_port $sub_port_input "tcp"
     
-    # 修复 Bug: 将生成的端口信息写入文件，供后续 Python 订阅服务调用
     mkdir -p /etc/hysteria
     echo "$sub_port_input" > /etc/hysteria/sub_port.txt
 }
@@ -788,7 +793,6 @@ EOF
     purple "  请在主菜单选择 [5] 获取节点与二维码。"
     echo ""
     sleep 3
-    # 修复 Bug: 移除这里的 menu 调用，直接通过外层 while 循环返回
 }
 
 unsthysteria() {
@@ -819,7 +823,8 @@ unsthysteria() {
     fi
     save_iptables
 
-    rm -rf /usr/local/bin/hysteria /etc/hysteria /var/www/hysteria
+    # 已增加 /usr/local/bin/hy2 的清理逻辑
+    rm -rf /usr/local/bin/hysteria /etc/hysteria /var/www/hysteria /usr/local/bin/hy2
 
     echo ""
     green "  Hysteria 2 服务及相关文件、端口规则已彻底清理！"
@@ -831,8 +836,8 @@ unsthysteria() {
 #  7. 二级菜单功能与辅助工具
 # =================================================================
 showconf() {
-    local ip=$(curl -s4m3 ip.sb -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1 || curl -s4m3 ifconfig.me -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1)
-    [[ -z "$ip" ]] && ip=$(curl -s6m3 ip.sb -k || curl -s6m3 ifconfig.me -k)
+    # 已优化冗余代码，直接调用提取好的全局函数获取 IP
+    realip
     
     local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null)
     local sub_path=$(cat /etc/hysteria/sub_path.txt 2>/dev/null)
@@ -905,7 +910,6 @@ showconf() {
     echo ""
     echo -en " ${LIGHT_YELLOW} ▶ 按回车键返回主菜单... ${PLAIN}"
     read temp
-    # 修复 Bug: 移除递归 menu
 }
 
 edit_config() {
@@ -1099,7 +1103,7 @@ menu() {
     green " 项目名称 ：Hysteria 2 一键部署与管理脚本 (极致优化版)"
     purple " 项目地址 ：哆啦的Github库 https://github.com/yanbinlti-glitch"
     green "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
-    yellow " 脚本快捷方式：hy2 (需自行设置别名，如无则直接运行脚本)"
+    yellow " 脚本快捷方式：hy2 (已自动配置，下次可在终端直接输入 hy2 启动)"
     red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
     echo -e "  ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}安装部署 Hysteria 2${PLAIN}"
     echo -e "  ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_RED}彻底卸载 Hysteria 2${PLAIN}"
