@@ -30,8 +30,9 @@ print_line() {
 # =================================================================
 [[ $EUID -ne 0 ]] && red " [错误] 请在 root 用户下运行此脚本！" && exit 1
 
-# 自动设置 hy2 快捷命令
-if [[ "$(realpath "$0" 2>/dev/null)" != "/usr/local/bin/hy2" ]]; then
+# 【修复 5】增强 realpath 的系统兼容性，增加 readlink 和 echo 后备方案
+SCRIPT_PATH=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
+if [[ "$SCRIPT_PATH" != "/usr/local/bin/hy2" ]]; then
     cp -f "$0" /usr/local/bin/hy2
     chmod +x /usr/local/bin/hy2
 fi
@@ -399,6 +400,9 @@ inst_port() {
         done
         green " 已开启端口跳跃范围: $firstport - $endport"
 
+        # 【修复 2】持久化存储跳跃端口范围，用于后续完整清理
+        echo "$firstport:$endport" > /etc/hysteria/port_hop.txt
+
         modprobe ip6table_nat 2>/dev/null || true
         iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop" 2>/dev/null
         ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop" 2>/dev/null
@@ -533,6 +537,18 @@ clean_env() {
         eval ip6tables -t nat $rule 2>/dev/null
     done
 
+    # 【修复 2】完整清理 UFW 和 firewall-cmd 中的跳跃端口
+    if [[ -f /etc/hysteria/port_hop.txt ]]; then
+        local hop_range=$(cat /etc/hysteria/port_hop.txt)
+        local f_port=$(echo $hop_range | cut -d':' -f1)
+        local e_port=$(echo $hop_range | cut -d':' -f2)
+        if command -v ufw >/dev/null 2>&1; then ufw delete allow $f_port:$e_port/udp 2>/dev/null; fi
+        if command -v firewall-cmd >/dev/null 2>&1; then
+            firewall-cmd --zone=public --remove-port=$f_port-$e_port/udp --permanent 2>/dev/null
+            firewall-cmd --reload 2>/dev/null
+        fi
+    fi
+
     svc_stop hysteria-server 2>/dev/null; svc_disable hysteria-server 2>/dev/null
     svc_stop hysteria-sub 2>/dev/null; svc_disable hysteria-sub 2>/dev/null
 
@@ -571,7 +587,6 @@ generate_client_configs() {
     
     local clash_cert_verify="false"
     
-    # 彻底摒弃 Pinning 逻辑，仅通过 insecure_state 判断是否开启跳过验证
     if [[ "$is_insecure_url" == "0" ]]; then
         clash_cert_verify="false"
         echo "$c_domain" > /etc/hysteria/sub_host.txt
@@ -613,13 +628,12 @@ generate_client_configs() {
     mkdir -p "$web_dir/$sub_uuid"
     echo "$sub_uuid" > /etc/hysteria/sub_path.txt
 
-    # 动态拼接 Hysteria 标准链接 (携带 insecure 参数)
     local url="hy2://$s_pwd@$uri_ip:$primary_port/?insecure=${is_insecure_url}&sni=$c_domain${mport_param}${obfs_param}#${custom_node_name}"
     echo "$url" > "$web_dir/$sub_uuid/url.txt"
     
-    echo "$url" | base64 | tr -d '\r\n' > "$web_dir/$sub_uuid/sub_b64.txt"
+    # 【修复 1】解决 echo 追加隐藏换行符导致 base64 订阅链接解析异常的 Bug
+    printf "%s" "$url" | base64 | tr -d '\r\n' > "$web_dir/$sub_uuid/sub_b64.txt"
 
-    # 生成 Clash 订阅配置 (动态应用 skip-cert-verify: true/false)
     cat << EOF > "$web_dir/$sub_uuid/clash-meta-sub.yaml"
 port: 7890
 socks-port: 7891
@@ -665,13 +679,14 @@ EOF
     chown -R nobody "$sub_cert_dir"
     chmod 400 "$sub_cert_dir/private.key" 2>/dev/null
     
-    # 增加 DualStackServer 以允许端口复用 (修复Python Server Bug)
+    # 【修复 4】增强 DualStackServer 动态探测，安全启用 IPv6 监听而不影响纯 IPv4 环境
     cat << EOF > "$web_dir/server.py"
 import http.server
 import socketserver
 import ssl
 import os
 import urllib.parse
+import socket
 
 PORT = $sub_port
 SUB_UUID = "$sub_uuid"
@@ -715,6 +730,13 @@ class SecureSubHandler(http.server.BaseHTTPRequestHandler):
 
 class DualStackServer(socketserver.TCPServer):
     allow_reuse_address = True
+    try:
+        # 探测内核是否真正支持 IPv6，如果支持则绑定双栈，否则回退
+        s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        s.close()
+        address_family = socket.AF_INET6
+    except Exception:
+        pass
 
 with DualStackServer(("", PORT), SecureSubHandler) as httpd:
     if "${is_insecure_url}" == "0" and os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
@@ -792,10 +814,14 @@ insthysteria() {
     esac
     
     wget -N -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}"
-    if [[ $? -ne 0 ]]; then
-        red " [错误] Hysteria 2 核心下载失败，请根据上方输出排查网络！"
+    
+    # 【修复 3】增加完整性校验防范 CDN 故障导致的 0 字节死循环
+    if [[ $? -ne 0 ]] || [[ ! -s /usr/local/bin/hysteria ]]; then
+        red " [错误] Hysteria 2 核心下载失败或文件损坏，请根据上方输出排查网络！"
+        rm -f /usr/local/bin/hysteria
         exit 1
     fi
+    
     chmod +x /usr/local/bin/hysteria
     green "  核心下载完成！"
     
@@ -836,7 +862,6 @@ EOF
     inst_sub_port
     inst_other_configs
 
-    # 如果是假域名，强制开启跳过验证
     if [[ "$hy_domain" == "www.bing.com" ]]; then
         cert_insecure_yaml="true"
         cert_insecure_url="1"
@@ -890,7 +915,6 @@ EOF
     local last_ip=$ip
     [[ "$ip" == *":"* ]] && last_ip="[$ip]"
 
-    # 生成供 NekoBox 等直接导入的通用 YAML 配置
     cat << EOF > /etc/hysteria/hy-client.yaml
 server: $last_ip:$last_port
 auth: $auth_pwd
@@ -940,7 +964,6 @@ showconf() {
     
     [[ -z "$sub_host" || "$sub_host" == "" ]] && sub_host=$ip
     
-    # 因为关闭了 pinning，所以假证书直接按 HTTP 方式下发订阅
     local protocol="https"
     [[ "$is_insecure" == "1" ]] && protocol="http"
     
@@ -1044,7 +1067,6 @@ edit_config() {
         svc_start hysteria-server
         sleep 1
         
-        # 增加重启后订阅实时同步刷新
         if [[ $SYSTEM == "Alpine" ]]; then
             if rc-service hysteria-server status | grep -q 'started'; then
                 green "  重启成功！新配置已生效。"
