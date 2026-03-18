@@ -3,7 +3,7 @@
 export LANG=en_US.UTF-8
 
 # =================================================================
-#  1. 现代化极简 UI 色彩库 (严格遵循: 绿/红/黄/紫，绝无蓝/青)
+#  1. 现代化极简 UI 色彩库 (严格遵循: 绿/红/黄/紫)
 # =================================================================
 RED="\033[31m"
 GREEN="\033[32m"
@@ -116,9 +116,9 @@ close_port() {
 check_env() {
     clear
     echo ""
-    green " =========================================================="
+    print_line
     green "                   系统依赖与环境检查                      "
-    green " =========================================================="
+    print_line
     echo ""
     green "  当前操作系统: $SYSTEM"
     yellow "  正在检查 Hysteria 2 核心及前置依赖包..."
@@ -189,9 +189,9 @@ check_env() {
 inst_cert() {
     clear
     echo ""
-    green " =========================================================="
+    print_line
     green "                    Hysteria 2 证书配置                    "
-    green " =========================================================="
+    print_line
     echo ""
     echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}必应自签证书 (推荐小白，默认)${PLAIN}"
     echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_PURPLE}Acme 脚本申请 (需 Cloudflare 域名托管)${PLAIN}"
@@ -449,7 +449,7 @@ inst_other_configs() {
 }
 
 # =================================================================
-#  6. 核心业务处理与部署逻辑
+#  6. 核心业务处理与部署逻辑 (已修复协议前缀与订阅Bug)
 # =================================================================
 generate_client_configs() {
     realip
@@ -498,9 +498,12 @@ generate_client_configs() {
     mkdir -p "$web_dir/$sub_uuid"
     echo "$sub_uuid" > /etc/hysteria/sub_path.txt
 
-    local url="hysteria2://$s_pwd@$uri_ip:$primary_port/?insecure=${is_insecure_url}&sni=$c_domain${mport_param}${obfs_param}#${custom_node_name}"
+    # 将前缀由 hysteria2:// 改为业界最标准的 hy2://
+    local url="hy2://$s_pwd@$uri_ip:$primary_port/?insecure=${is_insecure_url}&sni=$c_domain${mport_param}${obfs_param}#${custom_node_name}"
     echo "$url" > "$web_dir/$sub_uuid/url.txt"
-    echo -n "$url" | base64 | tr -d '\r\n' > "$web_dir/$sub_uuid/sub_b64.txt"
+    
+    # 将标准节点直接生成 Base64（删除了无用换行，后续在 python 中安全拼接）
+    echo "$url" | base64 | tr -d '\r\n' > "$web_dir/$sub_uuid/sub_b64.txt"
 
     cat << EOF > "$web_dir/$sub_uuid/clash-meta-sub.yaml"
 port: 7890
@@ -546,6 +549,7 @@ EOF
     chown -R nobody "$sub_cert_dir" >/dev/null 2>&1 || true
     chmod 400 "$sub_cert_dir/private.key" >/dev/null 2>&1 || true
     
+    # 重新构建加强版的 Python 订阅服务
     cat << EOF > "$web_dir/server.py"
 import http.server
 import socketserver
@@ -579,13 +583,15 @@ class SecureSubHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-type', 'text/plain; charset=utf-8')
             self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('profile-update-interval', '24') # 兼容客户端定期更新功能
             self.end_headers()
             
             ua = self.headers.get('User-Agent', '').lower()
             if any(x in ua for x in ['clash', 'meta', 'verge', 'stash', 'mihomo']):
                 self.wfile.write(CLASH_DATA)
             else:
-                self.wfile.write(B64_DATA)
+                # 强制返回自带标准换行符的 Base64，防止部分客户端解析异常断层
+                self.wfile.write(B64_DATA + b"\n")
         else:
             self.send_response(403)
             self.send_header('Content-type', 'text/html; charset=utf-8')
@@ -832,6 +838,7 @@ showconf() {
     local sub_path=$(cat /etc/hysteria/sub_path.txt 2>/dev/null)
     local sub_host=$(cat /etc/hysteria/sub_host.txt 2>/dev/null)
     local is_insecure=$(cat /etc/hysteria/insecure_state.txt 2>/dev/null)
+    local main_port=$(grep '^listen:' /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ')
     [[ -z "$sub_host" ]] && sub_host=$ip
     
     local protocol="https"
@@ -889,9 +896,12 @@ showconf() {
     
     echo ""
     print_line
-    yellow "  ▶ 使用说明："
-    echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_PURPLE}打开 Shadowrocket 或 v2rayNG 扫码直连。${PLAIN}"
-    echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_PURPLE}智能订阅自动识别客户端：Clash 获取 YAML，v2rayN 获取 Base64。${PLAIN}"
+    yellow "  ▶ 特别提醒（重要）："
+    echo -e "    ${LIGHT_GREEN}若您使用的是 阿里云/腾讯云/AWS 等自带控制台防火墙的云服务器，${PLAIN}"
+    echo -e "    ${LIGHT_GREEN}请务必在网页控制台的【安全组】中开放以下端口：${PLAIN}"
+    echo -e "    ${LIGHT_GREEN}主节点端口: ${main_port} (UDP)${PLAIN}"
+    echo -e "    ${LIGHT_GREEN}云订阅端口: ${sub_port} (TCP)${PLAIN}"
+    echo -e "    ${LIGHT_PURPLE}若不开放上述云端防火墙，所有的订阅都将提示无效或超时！${PLAIN}"
     echo ""
     echo -en " ${LIGHT_YELLOW} ▶ 按回车键返回主菜单... ${PLAIN}"
     read temp
@@ -1081,26 +1091,30 @@ enable_bbr() {
 # =================================================================
 menu() {
     clear
-    echo ""
-    print_line
-    green "          Hysteria 2 一键部署与管理脚本 (极致优化版)       "
-    print_line
-    echo ""
-    yellow "  ▶ 核心功能 "
-    echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}安装部署 Hysteria 2${PLAIN}"
-    echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_RED}彻底卸载 Hysteria 2${PLAIN}"
-    echo ""
-    yellow "  ▶ 服务管理 "
-    echo -e "    ${LIGHT_GREEN}[3]${PLAIN} ${LIGHT_YELLOW}启动 / 停止 / 重启服务${PLAIN}"
-    echo -e "    ${LIGHT_GREEN}[4]${PLAIN} ${LIGHT_PURPLE}查看 / 修改 配置文件${PLAIN}"
-    echo ""
-    yellow "  ▶ 实用工具 "
-    echo -e "    ${LIGHT_GREEN}[5]${PLAIN} ${LIGHT_GREEN}获取 节点配置 与 订阅链接${PLAIN}"
-    echo -e "    ${LIGHT_GREEN}[6]${PLAIN} ${LIGHT_YELLOW}查看 客户端连接 与 流量统计${PLAIN}"
-    echo -e "    ${LIGHT_GREEN}[7]${PLAIN} ${LIGHT_PURPLE}开启 BBR 及 UDP 缓冲区加速 (推荐)${PLAIN}"
-    echo ""
-    print_line
-    echo -e "    ${LIGHT_GREEN}[0]${PLAIN} ${LIGHT_RED}退出脚本${PLAIN}"
+    green "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+    echo -e "${LIGHT_GREEN}  ██████╗  ██╗   ██╗ ██████╗  ██╗       █████╗ ${PLAIN}"
+    echo -e "${LIGHT_GREEN}  ██╔══██╗ ██║   ██║ ██╔═══██╗██║      ██╔══██╗${PLAIN}"
+    echo -e "${LIGHT_GREEN}  ██║  ██║ ██║   ██║ ██║   ██║██║      ███████║${PLAIN}"
+    echo -e "${LIGHT_GREEN}  ██║  ██║ ██║   ██║ ██║   ██║██║      ██╔══██║${PLAIN}"
+    echo -e "${LIGHT_GREEN}  ██████╔╝ ╚██████╔╝ ╚██████╔╝███████╗ ██║  ██║${PLAIN}"
+    echo -e "${LIGHT_GREEN}  ╚═════╝   ╚══════╝  ╚═════╝ ╚══════╝ ╚═╝  ╚═╝${PLAIN}"
+    green "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+    green " 项目名称 ：Hysteria 2 一键部署与管理脚本 (极致优化版)"
+    green "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+    yellow " 脚本快捷方式：hy2 (需自行设置别名，如无则直接运行脚本)"
+    red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+    echo -e "  ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}安装部署 Hysteria 2${PLAIN}"
+    echo -e "  ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_RED}彻底卸载 Hysteria 2${PLAIN}"
+    echo "----------------------------------------------------------------------------------"
+    echo -e "  ${LIGHT_GREEN}[3]${PLAIN} ${LIGHT_YELLOW}启动 / 停止 / 重启服务${PLAIN}"
+    echo -e "  ${LIGHT_GREEN}[4]${PLAIN} ${LIGHT_PURPLE}查看 / 修改 配置文件${PLAIN}"
+    echo "----------------------------------------------------------------------------------"
+    echo -e "  ${LIGHT_GREEN}[5]${PLAIN} ${LIGHT_GREEN}获取 节点配置 与 订阅链接${PLAIN}"
+    echo -e "  ${LIGHT_GREEN}[6]${PLAIN} ${LIGHT_YELLOW}查看 客户端连接 与 流量统计${PLAIN}"
+    echo -e "  ${LIGHT_GREEN}[7]${PLAIN} ${LIGHT_PURPLE}开启 BBR 及 UDP 缓冲区加速 (推荐)${PLAIN}"
+    echo "----------------------------------------------------------------------------------"
+    echo -e "  ${LIGHT_GREEN}[0]${PLAIN} ${LIGHT_RED}退出脚本${PLAIN}"
+    red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
     echo ""
     echo -en " ${LIGHT_YELLOW} ▶ 请输入选项 [0-7]: ${PLAIN}"
     read menuInput
