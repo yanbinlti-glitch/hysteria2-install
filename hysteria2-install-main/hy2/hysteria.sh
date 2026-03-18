@@ -280,12 +280,22 @@ inst_cert() {
         fi
     elif [[ $certInput == 3 ]]; then
         echo ""
-        echo -en " ${LIGHT_YELLOW} ▶ 请输入公钥(crt)的绝对路径: ${PLAIN}"
-        read cert_path
-        echo -en " ${LIGHT_YELLOW} ▶ 请输入密钥(key)的绝对路径: ${PLAIN}"
-        read key_path
-        echo -en " ${LIGHT_YELLOW} ▶ 请输入对应的域名: ${PLAIN}"
-        read domain
+        # [修复 Bug 2] 增加自定义证书非空及存在性校验
+        while true; do
+            echo -en " ${LIGHT_YELLOW} ▶ 请输入公钥(crt)的绝对路径: ${PLAIN}"
+            read cert_path
+            if [[ -f "$cert_path" ]]; then break; else red " [错误] 文件不存在，请重新输入！"; fi
+        done
+        while true; do
+            echo -en " ${LIGHT_YELLOW} ▶ 请输入密钥(key)的绝对路径: ${PLAIN}"
+            read key_path
+            if [[ -f "$key_path" ]]; then break; else red " [错误] 文件不存在，请重新输入！"; fi
+        done
+        while true; do
+            echo -en " ${LIGHT_YELLOW} ▶ 请输入对应的域名: ${PLAIN}"
+            read domain
+            if [[ -n "$domain" ]]; then break; else red " [错误] 域名不能为空！"; fi
+        done
         hy_domain=$domain
     else
         echo ""
@@ -387,6 +397,10 @@ inst_sub_port(){
     done
     green " 订阅端口已设置为: $sub_port_input"
     open_port $sub_port_input "tcp"
+    
+    # [修复 Bug 1] 将生成的端口信息写入文件，供后续 Python 订阅服务调用
+    mkdir -p /etc/hysteria
+    echo "$sub_port_input" > /etc/hysteria/sub_port.txt
 }
 
 inst_other_configs() {
@@ -449,7 +463,7 @@ inst_other_configs() {
 }
 
 # =================================================================
-#  6. 核心业务处理与部署逻辑 (已修复协议前缀与订阅Bug)
+#  6. 核心业务处理与部署逻辑
 # =================================================================
 generate_client_configs() {
     realip
@@ -498,11 +512,9 @@ generate_client_configs() {
     mkdir -p "$web_dir/$sub_uuid"
     echo "$sub_uuid" > /etc/hysteria/sub_path.txt
 
-    # 将前缀由 hysteria2:// 改为业界最标准的 hy2://
     local url="hy2://$s_pwd@$uri_ip:$primary_port/?insecure=${is_insecure_url}&sni=$c_domain${mport_param}${obfs_param}#${custom_node_name}"
     echo "$url" > "$web_dir/$sub_uuid/url.txt"
     
-    # 将标准节点直接生成 Base64（删除了无用换行，后续在 python 中安全拼接）
     echo "$url" | base64 | tr -d '\r\n' > "$web_dir/$sub_uuid/sub_b64.txt"
 
     cat << EOF > "$web_dir/$sub_uuid/clash-meta-sub.yaml"
@@ -549,7 +561,6 @@ EOF
     chown -R nobody "$sub_cert_dir" >/dev/null 2>&1 || true
     chmod 400 "$sub_cert_dir/private.key" >/dev/null 2>&1 || true
     
-    # 重新构建加强版的 Python 订阅服务
     cat << EOF > "$web_dir/server.py"
 import http.server
 import socketserver
@@ -583,14 +594,13 @@ class SecureSubHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-type', 'text/plain; charset=utf-8')
             self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
-            self.send_header('profile-update-interval', '24') # 兼容客户端定期更新功能
+            self.send_header('profile-update-interval', '24')
             self.end_headers()
             
             ua = self.headers.get('User-Agent', '').lower()
             if any(x in ua for x in ['clash', 'meta', 'verge', 'stash', 'mihomo']):
                 self.wfile.write(CLASH_DATA)
             else:
-                # 强制返回自带标准换行符的 Base64，防止部分客户端解析异常断层
                 self.wfile.write(B64_DATA + b"\n")
         else:
             self.send_response(403)
@@ -678,7 +688,6 @@ insthysteria() {
     chmod +x /usr/local/bin/hysteria
     green "  核心下载完成！"
     
-    # 写入系统服务文件
     if [[ $SYSTEM == "Alpine" ]]; then
         cat << 'EOF' > /etc/init.d/hysteria-server
 #!/sbin/openrc-run
@@ -709,13 +718,11 @@ EOF
         systemctl daemon-reload
     fi
 
-    # 引导安装交互
     inst_cert
     inst_port
     inst_sub_port
     inst_other_configs
 
-    # 判断是否安全伪装
     if [[ "$hy_domain" == "www.bing.com" ]]; then
         cert_insecure_yaml="true"
         cert_insecure_url="1"
@@ -725,7 +732,6 @@ EOF
     fi
     echo "$cert_insecure_url" > /etc/hysteria/insecure_state.txt
 
-    # 写入主配置文件
     cat << EOF > /etc/hysteria/config.yaml
 listen: :$port
 
@@ -758,7 +764,6 @@ trafficStats:
   listen: 127.0.0.1:$api_port
 EOF
 
-    # 生成客户端本地记录信息
     local last_port=$port
     [[ -n $firstport ]] && last_port="$port,$firstport-$endport"
     local last_ip=$ip
@@ -772,7 +777,6 @@ tls:
   insecure: $cert_insecure_yaml
 EOF
 
-    # 启动 Hysteria
     svc_enable hysteria-server
     svc_start hysteria-server
     
@@ -784,7 +788,7 @@ EOF
     purple "  请在主菜单选择 [5] 获取节点与二维码。"
     echo ""
     sleep 3
-    menu
+    # [修复 Bug 3] 移除这里的 menu 调用，直接通过外层 while 循环返回
 }
 
 unsthysteria() {
@@ -794,11 +798,9 @@ unsthysteria() {
     local main_port=$(grep '^listen:' /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ')
     local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null)
 
-    # 端口清理
     [[ -n "$main_port" && "$main_port" =~ ^[0-9]+$ ]] && close_port $main_port "udp"
     [[ -n "$sub_port" && "$sub_port" =~ ^[0-9]+$ ]] && close_port $sub_port "tcp"
 
-    # 清理 NAT 端口跳跃规则
     iptables-save -t nat | grep "DNAT --to-destination :$main_port" | sed 's/^-A /-D /' | while read -r rule; do
         iptables -t nat $rule >/dev/null 2>&1 || true
     done
@@ -806,7 +808,6 @@ unsthysteria() {
         ip6tables -t nat $rule >/dev/null 2>&1 || true
     done
 
-    # 停用并删除服务
     svc_stop hysteria-server; svc_disable hysteria-server
     svc_stop hysteria-sub; svc_disable hysteria-sub
 
@@ -818,7 +819,6 @@ unsthysteria() {
     fi
     save_iptables
 
-    # 删除相关文件
     rm -rf /usr/local/bin/hysteria /etc/hysteria /var/www/hysteria
 
     echo ""
@@ -905,14 +905,14 @@ showconf() {
     echo ""
     echo -en " ${LIGHT_YELLOW} ▶ 按回车键返回主菜单... ${PLAIN}"
     read temp
-    menu
+    # [修复 Bug 3] 移除递归 menu
 }
 
 edit_config() {
     clear
     if [[ ! -f /etc/hysteria/config.yaml ]]; then
         red "  未检测到 Hysteria 2 配置文件，请先安装！"
-        sleep 2; menu; return
+        sleep 2; return
     fi
     
     echo ""
@@ -942,13 +942,12 @@ edit_config() {
     echo ""
     echo -en " ${LIGHT_YELLOW} ▶ 按回车键返回主菜单... ${PLAIN}"
     read temp
-    menu
 }
 
 check_traffic() {
     if [[ ! -f /etc/hysteria/config.yaml ]]; then
         red "  未检测到 Hysteria 2 配置文件，请先安装！"
-        sleep 2; menu; return
+        sleep 2; return
     fi
     
     if ! grep -q "^trafficStats:" /etc/hysteria/config.yaml; then
@@ -1007,7 +1006,6 @@ EOF
     echo ""
     echo -en " ${LIGHT_YELLOW} ▶ 按回车键返回主菜单... ${PLAIN}"
     read temp
-    menu
 }
 
 starthysteria() {
@@ -1015,7 +1013,7 @@ starthysteria() {
     svc_start hysteria-sub
     echo ""
     green "  Hysteria 2 及订阅服务已启动！"
-    sleep 2; menu
+    sleep 2
 }
 
 stophysteria_only() {
@@ -1042,10 +1040,10 @@ hysteriaswitch() {
     read switchInput
     case $switchInput in
         1 ) starthysteria ;;
-        2 ) stophysteria_only; sleep 2; menu ;;
+        2 ) stophysteria_only; sleep 2 ;;
         3 ) stophysteria_only; starthysteria ;;
-        0 ) menu ;;
-        * ) red "  输入无效，返回主菜单"; sleep 1; menu ;;
+        0 ) return ;;
+        * ) red "  输入无效"; sleep 1 ;;
     esac
 }
 
@@ -1055,7 +1053,7 @@ enable_bbr() {
     local kernel_v=$(uname -r | cut -d. -f1)
     if [[ "$kernel_v" -lt 4 ]]; then
         red "  当前内核版本过低 ($(uname -r))，不支持开启 BBR！"
-        sleep 3; menu; return
+        sleep 3; return
     fi
 
     modprobe tcp_bbr >/dev/null 2>&1 || true
@@ -1083,7 +1081,6 @@ enable_bbr() {
     echo ""
     echo -en " ${LIGHT_YELLOW} ▶ 按回车键返回主菜单... ${PLAIN}"
     read temp
-    menu
 }
 
 # =================================================================
@@ -1127,9 +1124,11 @@ menu() {
         6 ) check_traffic ;;
         7 ) enable_bbr ;;
         0 ) exit 0 ;;
-        * ) exit 1 ;;
+        * ) red "  输入无效"; sleep 1 ;;
     esac
 }
 
-# 执行入口
-menu
+# [修复 Bug 3] 引入 while 死循环进行菜单轮询，完美避免堆栈溢出
+while true; do
+    menu
+done
