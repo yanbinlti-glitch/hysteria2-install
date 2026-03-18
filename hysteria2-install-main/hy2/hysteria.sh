@@ -62,9 +62,9 @@ if [[ -z $(type -P curl) ]]; then
     $PKG_INSTALL curl
 fi
 
-# 获取公网真实IP
+# 获取公网真实IP (修复管道截断Bug)
 realip() {
-    ip=$(curl -s4m3 ip.sb -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1 || curl -s4m3 ifconfig.me -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1 || curl -s4m3 api.ipify.org -k | grep -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" | head -n 1)
+    ip=$(curl -s4m3 ip.sb -k | grep -m 1 -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" || curl -s4m3 ifconfig.me -k | grep -m 1 -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}" || curl -s4m3 api.ipify.org -k | grep -m 1 -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}")
     if [[ -z "$ip" ]]; then
         ip=$(curl -s6m3 ip.sb -k || curl -s6m3 ifconfig.me -k || curl -s6m3 api64.ipify.org -k)
     fi
@@ -85,7 +85,6 @@ svc_enable()  { if [[ $SYSTEM == "Alpine" ]]; then rc-update add "$1" default; e
 svc_disable() { if [[ $SYSTEM == "Alpine" ]]; then rc-update del "$1" default; else systemctl disable "$1"; fi; }
 
 save_iptables() {
-    # 修复未安装 netfilter-persistent 时的报错，增加容错机制
     if [[ $SYSTEM == "Alpine" ]]; then
         rc-service iptables save 2>/dev/null
         rc-service ip6tables save 2>/dev/null
@@ -216,7 +215,7 @@ inst_cert() {
     read certInput
     [[ -z $certInput ]] && certInput=1
     
-    rm -f /etc/hysteria/pin.txt # 清理旧指纹
+    rm -f /etc/hysteria/pin.txt 
 
     if [[ $certInput == 2 ]]; then
         cert_path="/root/cert.crt"
@@ -335,7 +334,6 @@ inst_cert() {
         openssl req -new -x509 -days 36500 -key /etc/hysteria/private.key -out /etc/hysteria/cert.crt -subj "/CN=www.bing.com"
         chmod 644 /etc/hysteria/cert.crt; chmod 600 /etc/hysteria/private.key
         
-        # 提取证书指纹以防中间人攻击 (Pinning)
         cert_pin=$(openssl x509 -in /etc/hysteria/cert.crt -noout -fingerprint -sha256 | cut -d "=" -f 2 | tr -d ':')
         echo "$cert_pin" > /etc/hysteria/pin.txt
         green " 已提取证书高强度安全指纹 (Pinning): $cert_pin"
@@ -394,7 +392,6 @@ inst_port() {
         done
         green " 已开启端口跳跃范围: $firstport - $endport"
 
-        # 修复某些内核不存在 IPv6 NAT 模块时的报错中断
         modprobe ip6table_nat 2>/dev/null || true
         iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop" 2>/dev/null
         ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop" 2>/dev/null
@@ -519,11 +516,9 @@ clean_env() {
     local main_port=$(grep '^listen:' /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ')
     local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null)
 
-    # 暴露防火墙端口清理日志
     [[ -n "$main_port" && "$main_port" =~ ^[0-9]+$ ]] && close_port $main_port "udp"
     [[ -n "$sub_port" && "$sub_port" =~ ^[0-9]+$ ]] && close_port $sub_port "tcp"
 
-    # 暴露跳跃端口清理日志
     iptables-save -t nat 2>/dev/null | grep "hy2-port-hop" | sed 's/^-A /-D /' | while read -r rule; do
         eval iptables -t nat $rule 2>/dev/null
     done
@@ -531,11 +526,9 @@ clean_env() {
         eval ip6tables -t nat $rule 2>/dev/null
     done
 
-    # 暴露服务停止日志
     svc_stop hysteria-server 2>/dev/null; svc_disable hysteria-server 2>/dev/null
     svc_stop hysteria-sub 2>/dev/null; svc_disable hysteria-sub 2>/dev/null
 
-    # 删除系统服务文件
     if [[ $SYSTEM == "Alpine" ]]; then
         rm -f /etc/init.d/hysteria-server /etc/init.d/hysteria-sub
     else
@@ -544,10 +537,8 @@ clean_env() {
     fi
     save_iptables
 
-    # 删除主程序和配置目录
     rm -rf /usr/local/bin/hysteria /etc/hysteria /var/www/hysteria
     
-    # 彻底卸载模式：删除证书和 acme 环境并保留卸载日志
     if [[ "$mode" == "all" ]]; then
         rm -f /root/cert.crt /root/private.key /root/ca.log
         if [[ -d /root/.acme.sh ]]; then
@@ -571,7 +562,6 @@ generate_client_configs() {
     local s_obfs_pwd=$(awk '/obfs:/{flag=1} flag && /password:/{print $2; flag=0}' /etc/hysteria/config.yaml | tr -d '"' | tr -d "'")
     local is_insecure_url=$(cat /etc/hysteria/insecure_state.txt 2>/dev/null || echo "1")
     
-    # Pinning (哈希指纹) 逻辑引入
     local pin_hash=""
     [[ -f /etc/hysteria/pin.txt ]] && pin_hash=$(cat /etc/hysteria/pin.txt)
     
@@ -580,7 +570,7 @@ generate_client_configs() {
     local clash_pin_block=""
     
     if [[ -n "$pin_hash" ]]; then
-        is_insecure_url="0" # 有指纹则完全安全，关闭 insecure
+        is_insecure_url="0"
         pin_param="&pinSHA256=$pin_hash"
         clash_pin_block="    pinSHA256: \"$pin_hash\""
         clash_cert_verify="false"
@@ -600,7 +590,6 @@ generate_client_configs() {
         clash_obfs_block="    obfs: salamander\n    obfs-password: \"$s_obfs_pwd\""
     fi
 
-    # 带宽动态化
     local c_up=$(cat /etc/hysteria/c_up.txt 2>/dev/null || echo "0")
     local c_down=$(cat /etc/hysteria/c_down.txt 2>/dev/null || echo "0")
     local clash_bw_block=""
@@ -611,7 +600,6 @@ generate_client_configs() {
     local yaml_json_ip="$ip"
     local uri_ip="$ip"
     
-    # 修复更原生的 IPv6 判断
     if [[ "$ip" == *":"* ]]; then
         uri_ip="[$ip]"
     fi
@@ -673,13 +661,13 @@ EOF
     local sub_cert_dir="$web_dir/certs"
     mkdir -p "$sub_cert_dir"
     
-    # 修复软链接穿透问题 (加上 -L 解引用)
     cp -L "$cert_path" "$sub_cert_dir/cert.crt" 2>/dev/null || cp -L /etc/hysteria/cert.crt "$sub_cert_dir/cert.crt" 2>/dev/null
     cp -L "$key_path" "$sub_cert_dir/private.key" 2>/dev/null || cp -L /etc/hysteria/private.key "$sub_cert_dir/private.key" 2>/dev/null
     
     chown -R nobody "$sub_cert_dir"
     chmod 400 "$sub_cert_dir/private.key" 2>/dev/null
     
+    # 增加 DualStackServer 以允许端口复用 (修复Python Server Bug)
     cat << EOF > "$web_dir/server.py"
 import http.server
 import socketserver
@@ -727,7 +715,10 @@ class SecureSubHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"<html><head><title>403 Forbidden</title></head><body><center><h1>403 Forbidden</h1></center><hr><center>nginx</center></body></html>")
 
-with socketserver.TCPServer(("", PORT), SecureSubHandler) as httpd:
+class DualStackServer(socketserver.TCPServer):
+    allow_reuse_address = True
+
+with DualStackServer(("", PORT), SecureSubHandler) as httpd:
     if "${is_insecure_url}" == "0" and os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(certfile=CERT_FILE, keyfile=KEY_FILE)
@@ -810,7 +801,6 @@ insthysteria() {
     chmod +x /usr/local/bin/hysteria
     green "  核心下载完成！"
     
-    # 增加连接数优化限制
     if [[ $SYSTEM == "Alpine" ]]; then
         cat << 'EOF' > /etc/init.d/hysteria-server
 #!/sbin/openrc-run
@@ -857,7 +847,6 @@ EOF
     fi
     echo "$cert_insecure_url" > /etc/hysteria/insecure_state.txt
 
-    # 引入 MTU 深度调优，降低封锁概率
     cat << EOF > /etc/hysteria/config.yaml
 listen: :$port
 
@@ -895,7 +884,6 @@ trafficStats:
   listen: 127.0.0.1:$api_port
 EOF
     
-    # 修复配置文件的安全权限问题
     chmod 600 /etc/hysteria/config.yaml
 
     local last_port=$port
@@ -951,11 +939,9 @@ showconf() {
     local hop_ports=$(grep '^server:' /etc/hysteria/hy-client.yaml 2>/dev/null | awk -F ',' '{print $2}')
     local pin_hash=$(cat /etc/hysteria/pin.txt 2>/dev/null)
     
-    # 修复未获取到 IP 时的 fallback 逻辑
     [[ -z "$sub_host" || "$sub_host" == "" ]] && sub_host=$ip
     
     local protocol="https"
-    # 如果有指纹验证，即使是自签也不用 insecure=1 的 http
     [[ "$is_insecure" == "1" && -z "$pin_hash" ]] && protocol="http"
     
     local sub_url=""
@@ -1058,16 +1044,20 @@ edit_config() {
         svc_start hysteria-server
         sleep 1
         
-        # 修复无状态检测直接报成功的 Bug
+        # 增加重启后订阅实时同步刷新 (修复修改配置后客户端失联 Bug)
         if [[ $SYSTEM == "Alpine" ]]; then
             if rc-service hysteria-server status | grep -q 'started'; then
                 green "  重启成功！新配置已生效。"
+                green "  正在同步更新客户端订阅配置..."
+                generate_client_configs
             else
                 red "  [错误] 服务重启失败！请重新检查 yaml 文件的缩进和格式是否正确。"
             fi
         else
             if systemctl is-active --quiet hysteria-server; then
                 green "  重启成功！新配置已生效。"
+                green "  正在同步更新客户端订阅配置..."
+                generate_client_configs
             else
                 red "  [错误] 服务启动失败！请重新检查 yaml 文件的缩进和格式是否正确。"
             fi
@@ -1109,7 +1099,6 @@ EOF
         [[ -z "$api_port" ]] && api_port=$(cat /etc/hysteria/api_port.txt 2>/dev/null)
     fi
 
-    # 修复因为目标没响应导致脚本卡死的问题，增加最大时长超时限制
     local traffic_data=$(curl -s --max-time 3 "http://127.0.0.1:$api_port/traffic")
     
     clear
@@ -1195,7 +1184,6 @@ enable_bbr() {
         sleep 3; return
     fi
 
-    # 深度判定：加载模块 || 检测内核直编支持
     if ! modprobe tcp_bbr 2>/dev/null; then
         if ! grep -q "bbr" /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
             red "  [错误] 当前系统/内核 (可能是 LXC 容器) 彻底不支持 BBR 模块！"
@@ -1203,7 +1191,6 @@ enable_bbr() {
         fi
     fi
     
-    # 修复 sysctl 配置文件匹配不到含空格的键值对导致报错的 Bug
     sed -i '/^[[:space:]]*net\.core\.default_qdisc/d' /etc/sysctl.conf
     sed -i '/^[[:space:]]*net\.ipv4\.tcp_congestion_control/d' /etc/sysctl.conf
     sed -i '/^[[:space:]]*net\.core\.rmem_max/d' /etc/sysctl.conf
