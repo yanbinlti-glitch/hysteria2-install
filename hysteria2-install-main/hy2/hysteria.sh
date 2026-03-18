@@ -58,8 +58,8 @@ done
 [[ -z $SYSTEM ]] && red " [错误] 目前暂不支持您的 VPS 操作系统！" && exit 1
 
 if [[ -z $(type -P curl) ]]; then
-    [[ ! $SYSTEM == "CentOS" ]] && $PKG_UPDATE
-    $PKG_INSTALL curl
+    [[ ! $SYSTEM == "CentOS" ]] && { $PKG_UPDATE || { echo ""; red " [错误] 系统软件源更新失败！"; exit 1; }; }
+    $PKG_INSTALL curl || { echo ""; red " [错误] curl 安装失败！请检查网络或系统源。"; exit 1; }
 fi
 
 # 获取公网真实IP (修复管道截断Bug)
@@ -125,7 +125,7 @@ close_port() {
 }
 
 # =================================================================
-#  4. 环境检查与预处理
+#  4. 环境检查与预处理 (带错误拦截与阻断)
 # =================================================================
 check_env() {
     clear
@@ -172,24 +172,22 @@ check_env() {
         yellow "  发现缺失前置组件，正在为您自动拉取安装，请查看下方日志..."
         echo ""
         
-        [[ ! $SYSTEM == "CentOS" ]] && $PKG_UPDATE
+        [[ ! $SYSTEM == "CentOS" ]] && { $PKG_UPDATE || { echo ""; red " [错误] 系统软件源更新失败！请检查网络连接或更换软件源后重试。"; exit 1; }; }
         
         if [[ $SYSTEM == "Alpine" ]]; then
-            $PKG_INSTALL curl wget sudo procps iptables ip6tables iproute2 python3 openssl socat cronie libqrencode-tools
+            $PKG_INSTALL curl wget sudo procps iptables ip6tables iproute2 python3 openssl socat cronie libqrencode-tools || { echo ""; red " [错误] 前置依赖安装失败！请检查系统源或网络后重试。"; exit 1; }
             svc_start crond; svc_enable crond
         elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" || $SYSTEM == "Alma" || $SYSTEM == "Rocky" ]]; then
-            $PKG_INSTALL epel-release
-            $PKG_INSTALL curl wget sudo procps iptables iptables-services iproute python3 openssl socat cronie qrencode
+            $PKG_INSTALL epel-release || { echo ""; red " [错误] epel-release 扩展源安装失败！"; exit 1; }
+            $PKG_INSTALL curl wget sudo procps iptables iptables-services iproute python3 openssl socat cronie qrencode || { echo ""; red " [错误] 前置依赖安装失败！请检查系统源或网络后重试。"; exit 1; }
             svc_start crond; svc_enable crond
         else
             export DEBIAN_FRONTEND=noninteractive
-            # ================= [新增依赖修复逻辑] =================
             yellow "  正在尝试修复并清理系统损坏的依赖项..."
-            apt-get --fix-broken install -y
+            apt-get --fix-broken install -y || { echo ""; red " [错误] 尝试修复系统损坏的依赖项失败！"; exit 1; }
             apt-get autoremove -y
             apt-get clean
-            # ======================================================
-            $PKG_INSTALL curl wget sudo procps iptables-persistent netfilter-persistent iproute2 python3 openssl socat cron qrencode
+            $PKG_INSTALL curl wget sudo procps iptables-persistent netfilter-persistent iproute2 python3 openssl socat cron qrencode || { echo ""; red " [错误] 前置依赖安装失败！请检查 APT 源或网络后重试。"; exit 1; }
             svc_start cron; svc_enable cron
         fi
         
@@ -273,7 +271,7 @@ inst_cert() {
                 read cf_token
                 [[ -z $cf_token ]] && red " Token 不能为空！" && exit 1
                 export CF_Token="$cf_token"
-                curl https://get.acme.sh | sh -s email="admin@${domain}"
+                curl https://get.acme.sh | sh -s email="admin@${domain}" || { echo ""; red " [错误] Acme.sh 脚本下载失败！"; exit 1; }
             else
                 echo -en " ${LIGHT_YELLOW} ▶ 请输入 Cloudflare 账号邮箱: ${PLAIN}"
                 read cf_email
@@ -282,7 +280,7 @@ inst_cert() {
                 [[ -z $cf_email || -z $cf_key ]] && red " 邮箱或 Key 不能为空！" && exit 1
                 export CF_Email="$cf_email"
                 export CF_Key="$cf_key"
-                curl https://get.acme.sh | sh -s email="$cf_email"
+                curl https://get.acme.sh | sh -s email="$cf_email" || { echo ""; red " [错误] Acme.sh 脚本下载失败！"; exit 1; }
             fi
             
             bash /root/.acme.sh/acme.sh --upgrade --auto-upgrade
@@ -307,7 +305,7 @@ inst_cert() {
                 green " 证书申请成功！已保存至 /root/ 目录下。"
                 hy_domain=$domain
             else
-                red " 证书申请失败！请向上翻阅执行日志检查具体报错信息。"
+                red " [错误] 证书申请失败！请向上翻阅执行日志检查具体报错信息。"
                 exit 1
             fi
         fi
@@ -796,12 +794,12 @@ insthysteria() {
         x86_64) hy_arch="amd64" ;;
         aarch64) hy_arch="arm64" ;;
         s390x) hy_arch="s390x" ;;
-        *) red " 不支持的架构: $arch" && exit 1 ;;
+        *) red " [错误] 不支持的架构: $arch" && exit 1 ;;
     esac
     
     wget -N -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}"
     if [[ $? -ne 0 ]]; then
-        red " Hysteria 2 核心下载失败，请根据上方输出排查网络！"
+        red " [错误] Hysteria 2 核心下载失败，请根据上方输出排查网络！"
         exit 1
     fi
     chmod +x /usr/local/bin/hysteria
