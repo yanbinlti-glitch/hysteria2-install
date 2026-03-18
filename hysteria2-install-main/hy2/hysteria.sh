@@ -99,26 +99,26 @@ check_env() {
 
     for cmd in "${cmds[@]}"; do
         if ! command -v "$cmd" &> /dev/null; then
-            red "   [✘] 缺失: $cmd"
+            echo -e "   ${LIGHT_RED}[✘] 缺失:${PLAIN}  ${LIGHT_YELLOW}【 $cmd 】${PLAIN}"
             missing=1
         else
-            green "   [✔] 正常: $cmd"
+            echo -e "   ${LIGHT_GREEN}[✔] 正常:${PLAIN}  ${LIGHT_CYAN}【 $cmd 】${PLAIN}"
         fi
     done
 
     if ! command -v crontab &> /dev/null; then
-        red "   [✘] 缺失: crontab (用于证书自动续期)"
+        echo -e "   ${LIGHT_RED}[✘] 缺失:${PLAIN}  ${LIGHT_YELLOW}【 crontab 】${PLAIN} (用于证书自动续期)"
         missing=1
     else
-        green "   [✔] 正常: crontab"
+        echo -e "   ${LIGHT_GREEN}[✔] 正常:${PLAIN}  ${LIGHT_CYAN}【 crontab 】${PLAIN}"
     fi
 
     if [[ $SYSTEM == "Debian" || $SYSTEM == "Ubuntu" ]]; then
         if ! command -v netfilter-persistent &> /dev/null; then
-            red "   [✘] 缺失: netfilter-persistent (用于防火墙规则保存)"
+            echo -e "   ${LIGHT_RED}[✘] 缺失:${PLAIN}  ${LIGHT_YELLOW}【 netfilter-persistent 】${PLAIN} (用于防火墙保存)"
             missing=1
         else
-            green "   [✔] 正常: netfilter-persistent"
+            echo -e "   ${LIGHT_GREEN}[✔] 正常:${PLAIN}  ${LIGHT_CYAN}【 netfilter-persistent 】${PLAIN}"
         fi
     fi
 
@@ -663,8 +663,8 @@ showconf(){
     
     cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     yellow " 使用说明："
-    purple " 1. 打开 Shadowrocket 或 v2rayNG 扫一扫功能直接扫码。"
-    purple " 2. 智能订阅会自动识别客户端！Clash 获取 YAML，v2rayN 获取 Base64。"
+    purple " [1] 打开 Shadowrocket 或 v2rayNG 扫一扫功能直接扫码。"
+    purple " [2] 智能订阅会自动识别客户端！Clash 获取 YAML，v2rayN 获取 Base64。"
     read -p " 按回车键返回主菜单..."
     menu
 }
@@ -1031,19 +1031,19 @@ menu() {
     green "         Hysteria 2 一键部署与管理脚本 (极致优化版)        "
     green " =========================================================="
     yellow " --- [核心功能] ---"
-    green  "   1. 安装部署 Hysteria 2"
-    red    "   2. 彻底卸载 Hysteria 2"
+    green  "   [1] 安装部署 Hysteria 2"
+    red    "   [2] 彻底卸载 Hysteria 2"
     cyan   " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     yellow " --- [服务管理] ---"
-    cyan   "   3. 启动 / 停止 / 重启服务"
-    purple "   4. 查看 / 修改 配置文件"
+    cyan   "   [3] 启动 / 停止 / 重启服务"
+    purple "   [4] 查看 / 修改 配置文件"
     cyan   " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     yellow " --- [实用工具] ---"
-    green  "   5. 获取 节点配置 与 订阅链接"
-    cyan   "   6. 查看 客户端连接 与 流量统计"
-    purple "   7. 开启 BBR 及 UDP 缓冲区加速 (推荐)"
+    green  "   [5] 获取 节点配置 与 订阅链接"
+    cyan   "   [6] 查看 客户端连接 与 流量统计"
+    purple "   [7] 开启 BBR 及 UDP 缓冲区加速 (推荐)"
     cyan   " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
-    red    "   0. 退出脚本"
+    red    "   [0] 退出脚本"
     read -rp " 请输入选项 [0-7]: " menuInput
     case $menuInput in
         1 ) insthysteria ;;
