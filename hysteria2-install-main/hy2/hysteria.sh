@@ -31,18 +31,22 @@ print_line() {
 # =================================================================
 [[ $EUID -ne 0 ]] && red " [错误] 请在 root 用户下运行此脚本！" && exit 1
 
-SCRIPT_PATH=$(realpath "$0" || readlink -f "$0" || echo "$0")
-if [[ "$SCRIPT_PATH" != "/usr/local/bin/hy2" ]]; then
-    cp -f "$0" /usr/local/bin/hy2
-    chmod +x /usr/local/bin/hy2
+# [修复1]: 安全提取脚本路径，防止 curl 管道符导致的 /usr/local/bin/hy2 覆盖为 bash 二进制
+SCRIPT_PATH=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
+if [[ -f "$SCRIPT_PATH" && "$(head -n 1 "$SCRIPT_PATH" 2>/dev/null)" == "#!/bin/bash" ]]; then
+    if [[ "$SCRIPT_PATH" != "/usr/local/bin/hy2" ]]; then
+        cp -f "$SCRIPT_PATH" /usr/local/bin/hy2
+        chmod +x /usr/local/bin/hy2
+    fi
 fi
 
-REGEX=("alpine" "debian" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "'amazon linux'" "fedora")
+# [修复2]: 移除 amazon linux 周围多余的单引号，防止正则匹配失败
+REGEX=("alpine" "debian" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "amazon linux" "fedora")
 RELEASE=("Alpine" "Debian" "Ubuntu" "CentOS" "CentOS" "Fedora")
 PACKAGE_UPDATE=("apk update" "apt-get update" "apt-get update" "yum -y update" "yum -y update" "yum -y update")
 PACKAGE_INSTALL=("apk add" "apt-get -y install" "apt-get -y install" "yum -y install" "yum -y install" "yum -y install")
 
-CMD=("$(grep -i pretty_name /etc/os-release | cut -d \" -f2)" "$(hostnamectl | grep -i system | cut -d : -f2)" "$(lsb_release -sd)" "$(grep -i description /etc/lsb-release | cut -d \" -f2)" "$(grep . /etc/redhat-release)" "$(grep . /etc/issue | cut -d \\ -f1 | sed '/^[ ]*$/d')")
+CMD=("$(grep -i pretty_name /etc/os-release 2>/dev/null | cut -d \" -f2)" "$(hostnamectl 2>/dev/null | grep -i system | cut -d : -f2)" "$(lsb_release -sd 2>/dev/null)" "$(grep -i description /etc/lsb-release 2>/dev/null | cut -d \" -f2)" "$(grep . /etc/redhat-release 2>/dev/null)" "$(grep . /etc/issue 2>/dev/null | cut -d \\ -f1 | sed '/^[ ]*$/d')")
 
 for i in "${CMD[@]}"; do
     SYS="$i" && [[ -n $SYS ]] && break
@@ -63,7 +67,6 @@ if [[ -z $(type -P curl) ]]; then
     $PKG_INSTALL curl || { echo ""; red " [错误] curl 安装失败！请检查网络或系统源。"; exit 1; }
 fi
 
-# 获取公网真实IP (优化双栈并发与超时体验)
 realip() {
     ip=$(curl -s --max-time 3 ip.sb -k | grep -m 1 -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}|([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:)*:[0-9a-fA-F]{1,4}")
     
@@ -79,14 +82,13 @@ realip() {
     fi
 }
 
-# 随机高强度字符生成
 gen_random_str() {
     local len=$1
-    cat /proc/sys/kernel/random/uuid | tr -d '-' | cut -c 1-$len || head -c 16 /dev/urandom | od -A n -t x1 | tr -d ' \n' | cut -c 1-$len
+    cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -d '-' | cut -c 1-$len || head -c 16 /dev/urandom | od -A n -t x1 | tr -d ' \n' | cut -c 1-$len
 }
 
 # =================================================================
-#  3. 服务管理与防火墙控制封装 (开放原生报错输出并修复 Firewalld)
+#  3. 服务管理与防火墙控制封装
 # =================================================================
 svc_start()   { if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" start; else systemctl start "$1"; fi; }
 svc_stop()    { if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" stop; else systemctl stop "$1"; fi; }
@@ -95,14 +97,14 @@ svc_disable() { if [[ $SYSTEM == "Alpine" ]]; then rc-update del "$1" default; e
 
 save_iptables() {
     if [[ $SYSTEM == "Alpine" ]]; then
-        rc-service iptables save
-        rc-service ip6tables save
+        rc-service iptables save 2>/dev/null
+        rc-service ip6tables save 2>/dev/null
     elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" || $SYSTEM == "Alma" || $SYSTEM == "Rocky" ]]; then
-        service iptables save
-        service ip6tables save
+        service iptables save 2>/dev/null
+        service ip6tables save 2>/dev/null
     else
         if command -v netfilter-persistent >/dev/null; then
-            netfilter-persistent save
+            netfilter-persistent save 2>/dev/null
         fi
     fi
 }
@@ -110,12 +112,12 @@ save_iptables() {
 open_port() {
     local port=$1
     local proto=$2
-    iptables -I INPUT -p $proto --dport $port -j ACCEPT
-    ip6tables -I INPUT -p $proto --dport $port -j ACCEPT
-    if command -v ufw >/dev/null; then ufw allow $port/$proto; fi
-    if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld; then
-        firewall-cmd --zone=public --add-port=$port/$proto --permanent
-        firewall-cmd --reload
+    iptables -I INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null
+    ip6tables -I INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null
+    if command -v ufw >/dev/null; then ufw allow $port/$proto 2>/dev/null; fi
+    if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
+        firewall-cmd --zone=public --add-port=$port/$proto --permanent 2>/dev/null
+        firewall-cmd --reload 2>/dev/null
     fi
     save_iptables
 }
@@ -123,12 +125,13 @@ open_port() {
 close_port() {
     local port=$1
     local proto=$2
-    iptables -D INPUT -p $proto --dport $port -j ACCEPT
-    ip6tables -D INPUT -p $proto --dport $port -j ACCEPT
-    if command -v ufw >/dev/null; then ufw delete allow $port/$proto; fi
-    if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld; then
-        firewall-cmd --zone=public --remove-port=$port/$proto --permanent
-        firewall-cmd --reload
+    # [修复5]: 屏蔽标准错误输出，防止端口未开放时删除操作产生的报错刷屏
+    iptables -D INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null
+    ip6tables -D INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null
+    if command -v ufw >/dev/null; then ufw delete allow $port/$proto 2>/dev/null; fi
+    if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
+        firewall-cmd --zone=public --remove-port=$port/$proto --permanent 2>/dev/null
+        firewall-cmd --reload 2>/dev/null
     fi
     save_iptables
 }
@@ -244,7 +247,8 @@ inst_cert() {
             domain=$(echo "$domain" | tr -d '\r' | tr -d ' ')
             green " 已记录域名：$domain"
             
-            domainIP=$(python3 -c "import socket; print(socket.getaddrinfo('${domain}', None)[0][4][0])" || echo "")
+            # [修复3]: 使用环境变量注入来替代直接拼写进 Python 字符串，彻底封堵命令注入漏洞
+            domainIP=$(DOMAIN="$domain" python3 -c "import socket, os; print(socket.getaddrinfo(os.environ.get('DOMAIN'), None)[0][4][0])" 2>/dev/null || echo "")
             
             if [[ -z "$domainIP" ]]; then
                 echo ""
@@ -418,13 +422,13 @@ inst_port() {
 
         echo "$firstport:$endport" > /etc/hysteria/port_hop.txt
 
-        modprobe ip6table_nat || true
-        iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop"
-        ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop"
-        if command -v ufw >/dev/null; then ufw allow $firstport:$endport/udp; fi
-        if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld; then
-            firewall-cmd --zone=public --add-port=$firstport-$endport/udp --permanent
-            firewall-cmd --reload
+        modprobe ip6table_nat 2>/dev/null || true
+        iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop" 2>/dev/null
+        ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop" 2>/dev/null
+        if command -v ufw >/dev/null; then ufw allow $firstport:$endport/udp 2>/dev/null; fi
+        if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
+            firewall-cmd --zone=public --add-port=$firstport-$endport/udp --permanent 2>/dev/null
+            firewall-cmd --reload 2>/dev/null
         fi
         save_iptables
     fi
@@ -548,12 +552,12 @@ clean_env() {
 
     if command -v iptables >/dev/null; then
         iptables -t nat -nL PREROUTING --line-numbers 2>/dev/null | grep "hy2-port-hop" | awk '{print $1}' | sort -nr | while read -r num; do
-            iptables -t nat -D PREROUTING "$num"
+            iptables -t nat -D PREROUTING "$num" 2>/dev/null
         done
     fi
     if command -v ip6tables >/dev/null; then
         ip6tables -t nat -nL PREROUTING --line-numbers 2>/dev/null | grep "hy2-port-hop" | awk '{print $1}' | sort -nr | while read -r num; do
-            ip6tables -t nat -D PREROUTING "$num"
+            ip6tables -t nat -D PREROUTING "$num" 2>/dev/null
         done
     fi
 
@@ -562,10 +566,10 @@ clean_env() {
         local f_port=$(echo "$hop_range" | cut -d':' -f1)
         local e_port=$(echo "$hop_range" | cut -d':' -f2)
         if [[ -n "$f_port" && -n "$e_port" ]]; then
-            if command -v ufw >/dev/null; then ufw delete allow "$f_port:$e_port/udp"; fi
-            if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld; then
-                firewall-cmd --zone=public --remove-port="$f_port-$e_port/udp" --permanent
-                firewall-cmd --reload
+            if command -v ufw >/dev/null; then ufw delete allow "$f_port:$e_port/udp" 2>/dev/null; fi
+            if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
+                firewall-cmd --zone=public --remove-port="$f_port-$e_port/udp" --permanent 2>/dev/null
+                firewall-cmd --reload 2>/dev/null
             fi
         fi
     fi
@@ -577,7 +581,7 @@ clean_env() {
         rm -f /etc/init.d/hysteria-server /etc/init.d/hysteria-sub
     else
         rm -f /etc/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-sub.service
-        systemctl daemon-reload
+        systemctl daemon-reload 2>/dev/null
     fi
     save_iptables
 
@@ -701,6 +705,7 @@ EOF
     chown -R nobody "$sub_cert_dir"
     chmod 400 "$sub_cert_dir/private.key"
     
+    # [修复6]: 重写 Python DualStackServer，优雅解决双栈绑定与 IPv4 后备问题
     cat << EOF > "$web_dir/server.py"
 import http.server
 import socketserver
@@ -751,22 +756,32 @@ class SecureSubHandler(http.server.BaseHTTPRequestHandler):
 
 class DualStackServer(socketserver.TCPServer):
     allow_reuse_address = True
-    try:
-        s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-        s.close()
-        address_family = socket.AF_INET6
-    except Exception:
-        pass
+    address_family = getattr(socket, 'AF_INET6', socket.AF_INET)
 
-with DualStackServer(("", PORT), SecureSubHandler) as httpd:
-    if "${is_insecure_url}" == "0" and os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
-        try:
-            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        except AttributeError:
-            context = ssl.SSLContext(ssl.PROTOCOL_TLS)
-        context.load_cert_chain(certfile=CERT_FILE, keyfile=KEY_FILE)
-        httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
-    httpd.serve_forever()
+    def server_bind(self):
+        if hasattr(socket, 'AF_INET6') and self.address_family == socket.AF_INET6:
+            try:
+                self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            except (AttributeError, OSError):
+                pass
+        super().server_bind()
+
+try:
+    httpd = DualStackServer(("", PORT), SecureSubHandler)
+except OSError:
+    # 回退到纯 IPv4 模式，防止 IPv6 完全缺失的机器报错
+    DualStackServer.address_family = socket.AF_INET
+    httpd = DualStackServer(("0.0.0.0", PORT), SecureSubHandler)
+
+if "${is_insecure_url}" == "0" and os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
+    try:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    except AttributeError:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS)
+    context.load_cert_chain(certfile=CERT_FILE, keyfile=KEY_FILE)
+    httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+
+httpd.serve_forever()
 EOF
 
     chown -R nobody "$web_dir"
@@ -806,7 +821,7 @@ EOF
         systemctl enable hysteria-sub
     fi
     
-    svc_stop hysteria-sub
+    svc_stop hysteria-sub 2>/dev/null
     svc_start hysteria-sub
 }
 
@@ -1172,7 +1187,7 @@ EOF
         [[ -z "$api_port" ]] && api_port=$(cat /etc/hysteria/api_port.txt | tr -d '\r')
     fi
 
-    local traffic_data=$(curl --max-time 3 "http://127.0.0.1:$api_port/traffic")
+    local traffic_data=$(curl --max-time 3 "http://127.0.0.1:$api_port/traffic" 2>/dev/null)
     
     clear
     echo ""
@@ -1267,24 +1282,13 @@ enable_bbr() {
         sleep 3; return
     fi
 
-    if ! modprobe tcp_bbr; then
-        if ! grep -q "bbr" /proc/sys/net/ipv4/tcp_available_congestion_control; then
+    if ! modprobe tcp_bbr 2>/dev/null; then
+        if ! grep -q "bbr" /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
             red "  [错误] 当前系统/内核 (可能是 LXC 容器) 彻底不支持 BBR 模块！"
             sleep 3; return
         fi
     fi
     
-    # 清理旧的系统参数避免重复叠加
-    sed -i '/^[[:space:]]*net\.core\.default_qdisc/d' /etc/sysctl.conf
-    sed -i '/^[[:space:]]*net\.ipv4\.tcp_congestion_control/d' /etc/sysctl.conf
-    sed -i '/^[[:space:]]*net\.core\.rmem_max/d' /etc/sysctl.conf
-    sed -i '/^[[:space:]]*net\.core\.rmem_default/d' /etc/sysctl.conf
-    sed -i '/^[[:space:]]*net\.core\.wmem_max/d' /etc/sysctl.conf
-    sed -i '/^[[:space:]]*net\.core\.wmem_default/d' /etc/sysctl.conf
-    sed -i '/^[[:space:]]*net\.ipv4\.udp_mem/d' /etc/sysctl.conf
-    sed -i '/^[[:space:]]*net\.core\.netdev_max_backlog/d' /etc/sysctl.conf
-    sed -i '/^[[:space:]]*net\.core\.somaxconn/d' /etc/sysctl.conf
-
     # 动态计算 UDP 缓冲区，防止小内存 VPS(如 512M) 发生 OOM 崩溃
     local total_mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
     local mem_pages=$(( total_mem_kb / 4 ))
@@ -1297,18 +1301,22 @@ enable_bbr() {
     local udp_mid=$(( udp_max * 3 / 4 ))
     local udp_min=$(( udp_max / 2 ))
 
-    # 注入极限高并发 UDP 队列调优参数
-    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-    echo "net.core.rmem_max=26214400" >> /etc/sysctl.conf
-    echo "net.core.rmem_default=26214400" >> /etc/sysctl.conf
-    echo "net.core.wmem_max=26214400" >> /etc/sysctl.conf
-    echo "net.core.wmem_default=26214400" >> /etc/sysctl.conf
-    echo "net.core.netdev_max_backlog=100000" >> /etc/sysctl.conf
-    echo "net.core.somaxconn=65535" >> /etc/sysctl.conf
-    echo "net.ipv4.udp_mem=$udp_min $udp_mid $udp_max" >> /etc/sysctl.conf
+    # [修复4]: 使用 /etc/sysctl.d 目录持久化并热重载，取代直接重定向写入 /etc/sysctl.conf
+    mkdir -p /etc/sysctl.d
+    cat << EOF > /etc/sysctl.d/99-hysteria-bbr.conf
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+net.core.rmem_max=26214400
+net.core.rmem_default=26214400
+net.core.wmem_max=26214400
+net.core.wmem_default=26214400
+net.core.netdev_max_backlog=100000
+net.core.somaxconn=65535
+net.ipv4.udp_mem=$udp_min $udp_mid $udp_max
+EOF
     
-    sysctl -p
+    # 兼容性重载：覆盖不同操作系统的 sysctl 应用方式
+    sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-hysteria-bbr.conf >/dev/null 2>&1 || sysctl -p >/dev/null 2>&1
     
     echo ""
     green "  BBR 及极致的 UDP 缓冲区底层调优开启成功！"
@@ -1334,21 +1342,17 @@ check_cert() {
         return
     fi
 
-    # 提取 Cert 和 Key 路径
     local cert_path=$(grep -w 'cert:' /etc/hysteria/config.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
     local key_path=$(grep -w 'key:' /etc/hysteria/config.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
 
     local has_error=0
 
-    # ==========================================
     # 1. 深度诊断：检查文件是否存在、大小及内容合法性
-    # ==========================================
     if [[ -z "$cert_path" || -z "$key_path" ]]; then
         red "  [✘] 配置文件中的证书路径为空！"
         yellow "  ▶ 报错原因: config.yaml 配置被破坏，或安装时参数未能正确写入。"
         has_error=1
     else
-        # 诊断公钥 (Cert)
         if [[ ! -f "$cert_path" ]]; then
             red "  [✘] 找不到证书公钥 (Cert): $cert_path"
             yellow "  ▶ 报错原因排查:"
@@ -1369,7 +1373,6 @@ check_cert() {
             green "  [✔] 公钥 (Cert) 基础状态正常: $cert_path"
         fi
 
-        # 诊断私钥 (Key)
         if [[ ! -f "$key_path" ]]; then
             red "  [✘] 找不到证书私钥 (Key): $key_path"
             yellow "  ▶ 报错原因: 私钥生成失败，同上请检查 API 和 DNS 状态。"
@@ -1389,9 +1392,7 @@ check_cert() {
 
     echo ""
 
-    # ==========================================
     # 2. 如果文件正常，进行密码学级别的匹配与过期诊断
-    # ==========================================
     if [[ $has_error -eq 0 ]]; then
         if command -v openssl >/dev/null; then
             local cert_subject=$(openssl x509 -in "$cert_path" -noout -subject | awk -F'CN = |CN=' '{print $2}' | awk -F',' '{print $1}')
@@ -1405,7 +1406,6 @@ check_cert() {
             yellow "  ▶ 密钥加密算法    : ${cert_algo:-未知}"
             yellow "  ▶ 证书生效日期    : $cert_start"
 
-            # 跨平台高精度时间计算
             if command -v python3 >/dev/null; then
                 local days_left=$(python3 -c "import datetime; t=datetime.datetime.strptime('$cert_end', '%b %d %H:%M:%S %Y %Z'); print((t - datetime.datetime.now()).days)" 2>/dev/null)
             else
@@ -1429,13 +1429,11 @@ check_cert() {
                 yellow "  ▶ 证书过期日期    : $cert_end"
             fi
 
-            # 密码学验证：检查 Cert 和 Key 是否成对
             local is_mismatch=0
             local cert_type="ECC"
             
             if openssl x509 -noout -modulus -in "$cert_path" 2>/dev/null | grep -q "Modulus"; then
                 cert_type="RSA"
-                # RSA 算法验证
                 local cert_mod=$(openssl x509 -noout -modulus -in "$cert_path" 2>/dev/null | tr -d '\r\n ')
                 local key_mod=$(openssl rsa -noout -modulus -in "$key_path" 2>/dev/null | tr -d '\r\n ')
                 if [[ "$cert_mod" == "$key_mod" && -n "$cert_mod" ]]; then
@@ -1447,11 +1445,9 @@ check_cert() {
                 fi
             else
                 cert_type="ECC"
-                # ECC 算法验证 (彻底修复 Alpine Busybox 环境下文本截断导致的误报)
                 local cert_pub=$(openssl x509 -in "$cert_path" -pubkey -noout 2>/dev/null | sed '/^-----/d' | tr -d '\r\n ')
                 local key_pub=$(openssl pkey -in "$key_path" -pubout 2>/dev/null | sed '/^-----/d' | tr -d '\r\n ')
                 
-                # 兼容部分老系统不支持 pkey 命令，使用 ec 备用提取
                 if [[ -z "$key_pub" ]]; then
                     key_pub=$(openssl ec -in "$key_path" -pubout 2>/dev/null | sed '/^-----/d' | tr -d '\r\n ')
                 fi
@@ -1465,7 +1461,6 @@ check_cert() {
                 fi
             fi
 
-            # ====== 新增：智能一键修复逻辑 ======
             if [[ $is_mismatch -eq 1 && -f "/root/.acme.sh/acme.sh" ]]; then
                 echo ""
                 print_line
@@ -1507,9 +1502,7 @@ check_cert() {
                     fi
                 fi
             fi
-            # ====================================
 
-            # 模式提示与 Acme 自检
             if [[ "$cert_subject" == "www.bing.com" || "$cert_issuer" =~ "bing.com" ]]; then
                 echo ""
                 yellow "  ℹ 提示: 当前使用的是系统自动生成的【必应自签伪装证书】。"
