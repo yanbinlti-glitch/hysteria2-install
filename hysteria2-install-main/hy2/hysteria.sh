@@ -1405,8 +1405,8 @@ check_cert() {
             # 密码学验证：检查 Cert 和 Key 是否成对
             if openssl x509 -noout -modulus -in "$cert_path" 2>/dev/null | grep -q "Modulus"; then
                 # RSA 算法验证
-                local cert_mod=$(openssl x509 -noout -modulus -in "$cert_path" 2>/dev/null)
-                local key_mod=$(openssl rsa -noout -modulus -in "$key_path" 2>/dev/null)
+                local cert_mod=$(openssl x509 -noout -modulus -in "$cert_path" 2>/dev/null | tr -d '\r\n ')
+                local key_mod=$(openssl rsa -noout -modulus -in "$key_path" 2>/dev/null | tr -d '\r\n ')
                 if [[ "$cert_mod" == "$key_mod" && -n "$cert_mod" ]]; then
                     green "  ▶ 证书与私钥匹配  : [✔] 完美配对 (RSA)"
                 else
@@ -1414,9 +1414,15 @@ check_cert() {
                     yellow "  ▶ 报错原因        : 现在的私钥解不开当前的公钥！可能是手动替换文件时只换了其中一个，或者生成时发生了错乱。"
                 fi
             else
-                # ECC 算法验证
-                local cert_pub=$(openssl x509 -in "$cert_path" -pubkey -noout 2>/dev/null)
-                local key_pub=$(openssl pkey -in "$key_path" -pubout 2>/dev/null)
+                # ECC 算法验证 (修复换行符与格式兼容性导致的误报)
+                local cert_pub=$(openssl x509 -in "$cert_path" -pubkey -noout 2>/dev/null | grep -v -- "-----" | tr -d '\r\n ')
+                local key_pub=$(openssl pkey -in "$key_path" -pubout 2>/dev/null | grep -v -- "-----" | tr -d '\r\n ')
+                
+                # 兼容部分老系统不支持 pkey 命令，使用 ec 备用提取
+                if [[ -z "$key_pub" ]]; then
+                    key_pub=$(openssl ec -in "$key_path" -pubout 2>/dev/null | grep -v -- "-----" | tr -d '\r\n ')
+                fi
+
                 if [[ "$cert_pub" == "$key_pub" && -n "$cert_pub" ]]; then
                     green "  ▶ 证书与私钥匹配  : [✔] 完美配对 (ECC)"
                 else
