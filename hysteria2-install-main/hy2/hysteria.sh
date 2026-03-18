@@ -77,7 +77,7 @@ gen_random_str() {
 }
 
 # =================================================================
-#  3. 服务管理与防火墙控制封装 (完全暴露执行日志)
+#  3. 服务管理与防火墙控制封装
 # =================================================================
 svc_start()   { if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" start; else systemctl start "$1"; fi; }
 svc_stop()    { if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" stop; else systemctl stop "$1"; fi; }
@@ -205,7 +205,7 @@ inst_cert() {
     green "                    Hysteria 2 证书配置                    "
     print_line
     echo ""
-    echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}必应自签证书 (推荐小白，默认)${PLAIN}"
+    echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}必应自签证书 + Pinning 防中间人指纹 (推荐小白，默认)${PLAIN}"
     echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_PURPLE}Acme 脚本申请 (需 Cloudflare 域名托管)${PLAIN}"
     echo -e "    ${LIGHT_GREEN}[3]${PLAIN} ${LIGHT_YELLOW}自定义证书路径${PLAIN}"
     echo ""
@@ -213,6 +213,8 @@ inst_cert() {
     read certInput
     [[ -z $certInput ]] && certInput=1
     
+    rm -f /etc/hysteria/pin.txt # 清理旧指纹
+
     if [[ $certInput == 2 ]]; then
         cert_path="/root/cert.crt"
         key_path="/root/private.key"
@@ -283,7 +285,6 @@ inst_cert() {
             
             mkdir -p /var/www/hysteria/certs
 
-            # 修复 Bug: 初装时由于服务尚未建立，盲目 restart 会报错。改为条件性重启
             if [[ $SYSTEM == "Alpine" ]]; then
                 local reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && chown -R nobody /var/www/hysteria/certs && if rc-service hysteria-server status | grep -q 'started'; then rc-service hysteria-server restart; fi && if rc-service hysteria-sub status | grep -q 'started'; then rc-service hysteria-sub restart; fi"
             else
@@ -331,6 +332,11 @@ inst_cert() {
         openssl req -new -x509 -days 36500 -key /etc/hysteria/private.key -out /etc/hysteria/cert.crt -subj "/CN=www.bing.com"
         chmod 644 /etc/hysteria/cert.crt; chmod 600 /etc/hysteria/private.key
         
+        # 提取证书指纹以防中间人攻击 (Pinning)
+        cert_pin=$(openssl x509 -in /etc/hysteria/cert.crt -noout -fingerprint -sha256 | cut -d "=" -f 2 | tr -d ':')
+        echo "$cert_pin" > /etc/hysteria/pin.txt
+        green " 已提取证书高强度安全指纹 (Pinning): $cert_pin"
+
         hy_domain="www.bing.com"
         domain="www.bing.com"
     fi
@@ -444,27 +450,44 @@ inst_other_configs() {
     echo ""
     print_line
     yellow "  拥塞控制配置 (降低延迟的核心)"
-    purple "  Hysteria 2 的 Brutal 算法需知晓服务器最大带宽。"
+    purple "  输入 0 将关闭 Brutal 算法并开启 BBR 回退自适应模式 (适合弱网或未知环境)"
     echo ""
-    echo -en " ${LIGHT_YELLOW} ▶ 请输入 VPS 最大上行带宽 (Mbps, 回车默认 1000): ${PLAIN}"
+    echo -en " ${LIGHT_YELLOW} ▶ 请输入 VPS 最大上行带宽 (Mbps, 输入 0 开启 BBR 自适应模式): ${PLAIN}"
     read bw_up_input
-    [[ -z $bw_up_input ]] && bw_up_input="1000"
+    [[ -z $bw_up_input ]] && bw_up_input="0"
     while [[ ! "$bw_up_input" =~ ^[0-9]+$ ]]; do
         red " [警告] 仅限纯数字！"
         echo -en " ${LIGHT_YELLOW} ▶ 重新输入上行带宽 (Mbps): ${PLAIN}"
         read bw_up_input
     done
-    bw_up="${bw_up_input} mbps"
     
-    echo -en " ${LIGHT_YELLOW} ▶ 请输入 VPS 最大下行带宽 (Mbps, 回车默认 1000): ${PLAIN}"
-    read bw_down_input
-    [[ -z $bw_down_input ]] && bw_down_input="1000"
-    while [[ ! "$bw_down_input" =~ ^[0-9]+$ ]]; do
-        red " [警告] 仅限纯数字！"
-        echo -en " ${LIGHT_YELLOW} ▶ 重新输入下行带宽 (Mbps): ${PLAIN}"
+    if [[ "$bw_up_input" != "0" ]]; then
+        bw_up="${bw_up_input} mbps"
+        echo -en " ${LIGHT_YELLOW} ▶ 请输入 VPS 最大下行带宽 (Mbps, 回车默认 1000): ${PLAIN}"
         read bw_down_input
-    done
-    bw_down="${bw_down_input} mbps"
+        [[ -z $bw_down_input ]] && bw_down_input="1000"
+        while [[ ! "$bw_down_input" =~ ^[0-9]+$ ]]; do
+            red " [警告] 仅限纯数字！"
+            echo -en " ${LIGHT_YELLOW} ▶ 重新输入下行带宽 (Mbps): ${PLAIN}"
+            read bw_down_input
+        done
+        bw_down="${bw_down_input} mbps"
+        
+        echo ""
+        purple "  为保证 Brutal 算法在客户端高效执行，请填写客户端期望速度："
+        echo -en " ${LIGHT_YELLOW} ▶ 客户端期望下载速度 (Mbps, 回车默认 500): ${PLAIN}"
+        read c_down
+        [[ -z $c_down ]] && c_down="500"
+        echo -en " ${LIGHT_YELLOW} ▶ 客户端期望上传速度 (Mbps, 回车默认 50): ${PLAIN}"
+        read c_up
+        [[ -z $c_up ]] && c_up="50"
+        echo "$c_down" > /etc/hysteria/c_down.txt
+        echo "$c_up" > /etc/hysteria/c_up.txt
+    else
+        green " 已开启 BBR 自适应回退模式！"
+        echo "0" > /etc/hysteria/c_down.txt
+        echo "0" > /etc/hysteria/c_up.txt
+    fi
 
     echo ""
     print_line
@@ -544,11 +567,25 @@ generate_client_configs() {
     local s_obfs_pwd=$(awk '/obfs:/{flag=1} flag && /password:/{print $2; flag=0}' /etc/hysteria/config.yaml | tr -d '"' | tr -d "'")
     local is_insecure_url=$(cat /etc/hysteria/insecure_state.txt 2>/dev/null || echo "1")
     
-    local clash_cert_verify="true"
-    if [[ "$is_insecure_url" == "0" ]]; then
+    # Pinning (哈希指纹) 逻辑引入
+    local pin_hash=""
+    [[ -f /etc/hysteria/pin.txt ]] && pin_hash=$(cat /etc/hysteria/pin.txt)
+    
+    local clash_cert_verify="false"
+    local pin_param=""
+    local clash_pin_block=""
+    
+    if [[ -n "$pin_hash" ]]; then
+        is_insecure_url="0" # 有指纹则完全安全，关闭 insecure
+        pin_param="&pinSHA256=$pin_hash"
+        clash_pin_block="    pinSHA256: \"$pin_hash\""
+        clash_cert_verify="false"
+        echo "$ip" > /etc/hysteria/sub_host.txt
+    elif [[ "$is_insecure_url" == "0" ]]; then
         clash_cert_verify="false"
         echo "$c_domain" > /etc/hysteria/sub_host.txt
     else
+        clash_cert_verify="true"
         echo "$ip" > /etc/hysteria/sub_host.txt
     fi
 
@@ -557,6 +594,14 @@ generate_client_configs() {
     if [[ -n "$s_obfs_pwd" ]]; then
         obfs_param="&obfs=salamander&obfs-password=${s_obfs_pwd}"
         clash_obfs_block="    obfs: salamander\n    obfs-password: \"$s_obfs_pwd\""
+    fi
+
+    # 带宽动态化
+    local c_up=$(cat /etc/hysteria/c_up.txt 2>/dev/null || echo "0")
+    local c_down=$(cat /etc/hysteria/c_down.txt 2>/dev/null || echo "0")
+    local clash_bw_block=""
+    if [[ "$c_up" != "0" ]]; then
+        clash_bw_block="    up: '${c_up} mbps'\n    down: '${c_down} mbps'"
     fi
 
     local yaml_json_ip="$ip"
@@ -577,7 +622,7 @@ generate_client_configs() {
     mkdir -p "$web_dir/$sub_uuid"
     echo "$sub_uuid" > /etc/hysteria/sub_path.txt
 
-    local url="hy2://$s_pwd@$uri_ip:$primary_port/?insecure=${is_insecure_url}&sni=$c_domain${mport_param}${obfs_param}#${custom_node_name}"
+    local url="hy2://$s_pwd@$uri_ip:$primary_port/?insecure=${is_insecure_url}&sni=$c_domain${mport_param}${obfs_param}${pin_param}#${custom_node_name}"
     echo "$url" > "$web_dir/$sub_uuid/url.txt"
     
     echo "$url" | base64 | tr -d '\r\n' > "$web_dir/$sub_uuid/sub_b64.txt"
@@ -599,11 +644,11 @@ $([[ -n "$hop_ports" ]] && echo "    ports: '$hop_ports'")
     password: "$s_pwd"
     sni: "$c_domain"
     skip-cert-verify: $clash_cert_verify
+$(echo -e "$clash_pin_block")
     alpn:
       - h3
 $(echo -e "$clash_obfs_block")
-    up: '50 mbps'
-    down: '500 mbps'
+$(echo -e "$clash_bw_block")
 
 proxy-groups:
   - name: "节点选择"
@@ -803,8 +848,12 @@ EOF
     fi
     echo "$cert_insecure_url" > /etc/hysteria/insecure_state.txt
 
+    # 引入 MTU 深度调优，降低封锁概率
     cat << EOF > /etc/hysteria/config.yaml
 listen: :$port
+
+quic:
+  mtu: 1350
 
 tls:
   cert: $cert_path
@@ -814,9 +863,11 @@ auth:
   type: password
   password: $auth_pwd
 
-bandwidth:
+$(if [[ "$bw_up_input" != "0" ]]; then
+echo "bandwidth:
   up: $bw_up
-  down: $bw_down
+  down: $bw_down"
+fi)
 
 $(if [[ -n "$obfs_pwd" ]]; then
 echo "obfs:
@@ -885,12 +936,15 @@ showconf() {
     local sub_host=$(cat /etc/hysteria/sub_host.txt 2>/dev/null)
     local is_insecure=$(cat /etc/hysteria/insecure_state.txt 2>/dev/null)
     local main_port=$(grep '^listen:' /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ')
+    local hop_ports=$(grep '^server:' /etc/hysteria/hy-client.yaml 2>/dev/null | awk -F ',' '{print $2}')
+    local pin_hash=$(cat /etc/hysteria/pin.txt 2>/dev/null)
     
     # 修复未获取到 IP 时的 fallback 逻辑
     [[ -z "$sub_host" || "$sub_host" == "" ]] && sub_host=$ip
     
     local protocol="https"
-    [[ "$is_insecure" == "1" ]] && protocol="http"
+    # 如果有指纹验证，即使是自签也不用 insecure=1 的 http
+    [[ "$is_insecure" == "1" && -z "$pin_hash" ]] && protocol="http"
     
     local sub_url=""
     if [[ -n $(echo "$sub_host" | grep ":") ]]; then
@@ -948,6 +1002,9 @@ showconf() {
     echo -e "    ${LIGHT_GREEN}若您使用的是 阿里云/腾讯云/AWS 等自带控制台防火墙的云服务器，${PLAIN}"
     echo -e "    ${LIGHT_GREEN}请务必在网页控制台的【安全组】中开放以下端口：${PLAIN}"
     echo -e "    ${LIGHT_GREEN}主节点端口: ${main_port} (UDP)${PLAIN}"
+    if [[ -n "$hop_ports" ]]; then
+        echo -e "    ${LIGHT_RED}跳跃端口组: ${hop_ports} (UDP) - 必须放行整个范围！${PLAIN}"
+    fi
     echo -e "    ${LIGHT_GREEN}云订阅端口: ${sub_port} (TCP)${PLAIN}"
     echo -e "    ${LIGHT_PURPLE}若不开放上述云端防火墙，所有的订阅都将提示无效或超时！${PLAIN}"
     echo ""
@@ -1161,6 +1218,7 @@ check_cert() {
     fi
 
     local cert_path=$(grep -w 'cert:' /etc/hysteria/config.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
+    local pin_hash=$(cat /etc/hysteria/pin.txt 2>/dev/null)
 
     if [[ -z "$cert_path" || ! -f "$cert_path" ]]; then
         red "  [✘] 未找到证书文件！证书可能未成功申请，或路径配置有误。"
@@ -1198,6 +1256,9 @@ check_cert() {
             if [[ "$cert_subject" == "www.bing.com" ]]; then
                 echo ""
                 yellow "  ℹ 提示: 当前使用的是系统自动生成的【必应自签伪装证书】。"
+                if [[ -n "$pin_hash" ]]; then
+                    green "  ✔ 已启用高强度 Pinning 指纹验证，无惧中间人攻击。"
+                fi
             elif [[ "$cert_issuer" =~ "Let's Encrypt" || "$cert_issuer" =~ "ZeroSSL" || "$cert_issuer" =~ "Google" ]]; then
                 echo ""
                 green "  ℹ 提示: 当前使用的是受信任的【真实域名证书】。"
