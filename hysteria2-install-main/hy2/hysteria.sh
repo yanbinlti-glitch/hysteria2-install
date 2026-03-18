@@ -469,6 +469,50 @@ inst_other_configs() {
 # =================================================================
 #  6. 核心业务处理与部署逻辑
 # =================================================================
+clean_env() {
+    local mode=$1
+    
+    local main_port=$(grep '^listen:' /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ')
+    local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null)
+
+    # 清理防火墙端口
+    [[ -n "$main_port" && "$main_port" =~ ^[0-9]+$ ]] && close_port $main_port "udp" >/dev/null 2>&1
+    [[ -n "$sub_port" && "$sub_port" =~ ^[0-9]+$ ]] && close_port $sub_port "tcp" >/dev/null 2>&1
+
+    # 清理端口跳跃规则
+    iptables-save -t nat 2>/dev/null | grep "hy2-port-hop" | sed 's/^-A /-D /' | while read -r rule; do
+        iptables -t nat $rule || true
+    done
+    ip6tables-save -t nat 2>/dev/null | grep "hy2-port-hop" | sed 's/^-A /-D /' | while read -r rule; do
+        ip6tables -t nat $rule || true
+    done
+
+    # 停止并禁用服务
+    svc_stop hysteria-server >/dev/null 2>&1; svc_disable hysteria-server >/dev/null 2>&1
+    svc_stop hysteria-sub >/dev/null 2>&1; svc_disable hysteria-sub >/dev/null 2>&1
+
+    # 删除系统服务文件
+    if [[ $SYSTEM == "Alpine" ]]; then
+        rm -f /etc/init.d/hysteria-server /etc/init.d/hysteria-sub
+    else
+        rm -f /etc/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-sub.service
+        systemctl daemon-reload || true
+    fi
+    save_iptables >/dev/null 2>&1
+
+    # 删除主程序和配置目录
+    rm -rf /usr/local/bin/hysteria /etc/hysteria /var/www/hysteria
+    
+    # 彻底卸载模式：删除证书和 acme 环境
+    if [[ "$mode" == "all" ]]; then
+        rm -f /root/cert.crt /root/private.key /root/ca.log
+        if [[ -d /root/.acme.sh ]]; then
+            /root/.acme.sh/acme.sh --uninstall >/dev/null 2>&1 || true
+            rm -rf /root/.acme.sh
+        fi
+    fi
+}
+
 generate_client_configs() {
     realip
     local s_pwd=$(grep 'password:' /etc/hysteria/config.yaml | head -n 1 | awk '{print $2}')
@@ -662,6 +706,14 @@ EOF
 }
 
 insthysteria() {
+    # 覆盖重装前自动清理旧文件和规则（保留证书）
+    if [[ -f "/etc/hysteria/config.yaml" || -f "/usr/local/bin/hysteria" ]]; then
+        echo ""
+        yellow "  检测到旧版本配置，正在清理旧规则与文件，为您重新生成..."
+        clean_env "keep_certs"
+        green "  旧文件清理完成，准备重新部署！"
+    fi
+    
     check_env
     mkdir -p /etc/hysteria
     
@@ -796,37 +848,13 @@ EOF
 
 unsthysteria() {
     echo ""
-    yellow "  正在安全地清理系统网络与防火墙规则..."
+    yellow "  正在安全地清理系统网络、防火墙规则，并彻底卸载相关证书..."
     
-    local main_port=$(grep '^listen:' /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ')
-    local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null)
-
-    [[ -n "$main_port" && "$main_port" =~ ^[0-9]+$ ]] && close_port $main_port "udp"
-    [[ -n "$sub_port" && "$sub_port" =~ ^[0-9]+$ ]] && close_port $sub_port "tcp"
-
-    # 卸载时精准清理跳跃端口规则，防正则误删
-    iptables-save -t nat | grep "hy2-port-hop" | sed 's/^-A /-D /' | while read -r rule; do
-        iptables -t nat $rule || true
-    done
-    ip6tables-save -t nat | grep "hy2-port-hop" | sed 's/^-A /-D /' | while read -r rule; do
-        ip6tables -t nat $rule || true
-    done
-
-    svc_stop hysteria-server; svc_disable hysteria-server
-    svc_stop hysteria-sub; svc_disable hysteria-sub
-
-    if [[ $SYSTEM == "Alpine" ]]; then
-        rm -f /etc/init.d/hysteria-server /etc/init.d/hysteria-sub
-    else
-        rm -f /etc/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-sub.service
-        systemctl daemon-reload || true
-    fi
-    save_iptables
-
-    rm -rf /usr/local/bin/hysteria /etc/hysteria /var/www/hysteria /usr/local/bin/hy2
+    clean_env "all"
+    rm -f /usr/local/bin/hy2
 
     echo ""
-    green "  Hysteria 2 服务及相关文件、端口规则已彻底清理！"
+    green "  Hysteria 2 服务及相关文件、端口规则、证书已被彻底清理！"
     sleep 2
     exit 0
 }
