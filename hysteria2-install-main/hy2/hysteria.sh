@@ -70,6 +70,12 @@ realip() {
     fi
 }
 
+# 随机高强度字符生成 (兼容 Alpine)
+gen_random_str() {
+    local len=$1
+    cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -d '-' | cut -c 1-$len || head -c 16 /dev/urandom | od -A n -t x1 | tr -d ' \n' | cut -c 1-$len
+}
+
 # =================================================================
 #  3. 服务管理与防火墙控制封装 (日志已全开)
 # =================================================================
@@ -223,7 +229,7 @@ inst_cert() {
             [[ -z $domain ]] && red " 未输入域名，无法执行操作！" && exit 1
             green " 已记录域名：$domain"
             
-            # 兼容 IPv4 和 IPv6 解析，并增加容错处理
+            # 兼容 IPv4 和 IPv6 解析，增加容错
             domainIP=$(python3 -c "import socket; print(socket.getaddrinfo('${domain}', None)[0][4][0])" 2>/dev/null || echo "")
             
             if [[ -z "$domainIP" ]]; then
@@ -279,7 +285,7 @@ inst_cert() {
             # 提前创建目录，防止 cp 报错
             mkdir -p /var/www/hysteria/certs
 
-            # 重启命令加入复制证书逻辑和修正权限，确保 Python 订阅服务端同步更新
+            # 重启命令加入复制证书逻辑和修正权限
             local reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && chown -R nobody /var/www/hysteria/certs && systemctl restart hysteria-server && systemctl restart hysteria-sub"
             [[ $SYSTEM == "Alpine" ]] && reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && chown -R nobody /var/www/hysteria/certs && rc-service hysteria-server restart && rc-service hysteria-sub restart"
             
@@ -379,8 +385,9 @@ inst_port() {
         green " 已开启端口跳跃范围: $firstport - $endport"
 
         modprobe ip6table_nat || true
-        iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j DNAT --to-destination :$port -m comment --comment "hy2-port-hop"
-        ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j DNAT --to-destination :$port -m comment --comment "hy2-port-hop" || true
+        # 修复路由迷失问题，使用 REDIRECT 代替 DNAT
+        iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop"
+        ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop" || true
         if command -v ufw >/dev/null 2>&1; then ufw allow $firstport:$endport/udp || true; fi
         if command -v firewall-cmd >/dev/null 2>&1; then
             firewall-cmd --zone=public --add-port=$firstport-$endport/udp --permanent || true
@@ -421,7 +428,7 @@ inst_other_configs() {
     echo ""
     echo -en " ${LIGHT_YELLOW} ▶ 设置节点连接密码 (回车自动生成): ${PLAIN}"
     read auth_pwd
-    [[ -z $auth_pwd ]] && auth_pwd=$(cat /proc/sys/kernel/random/uuid 2>/dev/null | cut -c 1-8 || date +%s%N | md5sum | cut -c 1-8)
+    [[ -z $auth_pwd ]] && auth_pwd=$(gen_random_str 8)
     green " 连接密码为: $auth_pwd"
 
     echo ""
@@ -468,7 +475,7 @@ inst_other_configs() {
     read enable_obfs
     [[ -z $enable_obfs ]] && enable_obfs="y"
     if [[ "$enable_obfs" == "y" || "$enable_obfs" == "Y" ]]; then
-        obfs_pwd=$(cat /proc/sys/kernel/random/uuid 2>/dev/null | cut -c 1-12 || date +%s%N | md5sum | cut -c 1-12)
+        obfs_pwd=$(gen_random_str 12)
         green " 已开启混淆，系统生成的密钥为: $obfs_pwd"
     else
         obfs_pwd=""
@@ -566,7 +573,7 @@ generate_client_configs() {
     local web_dir="/var/www/hysteria"
     mkdir -p "$web_dir"
 
-    local sub_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s%N | md5sum | head -c 16)
+    local sub_uuid=$(gen_random_str 16)
     mkdir -p "$web_dir/$sub_uuid"
     echo "$sub_uuid" > /etc/hysteria/sub_path.txt
 
@@ -716,7 +723,6 @@ EOF
 }
 
 insthysteria() {
-    # 覆盖重装前自动清理旧文件和规则（保留证书）
     if [[ -f "/etc/hysteria/config.yaml" || -f "/usr/local/bin/hysteria" ]]; then
         echo ""
         yellow "  检测到旧版本配置，正在清理旧规则与文件，为您重新生成..."
@@ -742,8 +748,6 @@ insthysteria() {
         *) red " 不支持的架构: $arch" && exit 1 ;;
     esac
     
-    # 移除通过 curl 抓取 hy_ver 的繁琐步骤
-    # 直接使用官方提供的 latest 下载链接
     wget -N -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}"
     if [[ $? -ne 0 ]]; then
         red " Hysteria 2 核心下载失败，请根据上方输出排查网络！"
@@ -752,6 +756,7 @@ insthysteria() {
     chmod +x /usr/local/bin/hysteria
     green "  核心下载完成！"
     
+    # 增加连接数优化限制
     if [[ $SYSTEM == "Alpine" ]]; then
         cat << 'EOF' > /etc/init.d/hysteria-server
 #!/sbin/openrc-run
@@ -760,6 +765,7 @@ command="/usr/local/bin/hysteria"
 command_args="server -c /etc/hysteria/config.yaml"
 command_background=true
 pidfile="/run/hysteria-server.pid"
+rc_ulimit="-n 1048576"
 EOF
         chmod +x /etc/init.d/hysteria-server
     else
@@ -772,6 +778,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/etc/hysteria
+LimitNOFILE=1048576
 ExecStart=/usr/local/bin/hysteria server -c /etc/hysteria/config.yaml
 Restart=always
 RestartSec=3
@@ -961,7 +968,6 @@ edit_config() {
     cat /etc/hysteria/config.yaml
     echo ""
     print_line
-    # 提前警告手动更改端口带来的防火墙风险
     yellow "  [警告] 如果您在此处修改了 listen (主端口) 或通过系统修改了订阅端口，"
     yellow "         脚本将无法自动更新系统的防火墙规则！修改后请务必自行放行新端口。"
     print_line
@@ -1006,7 +1012,6 @@ EOF
         svc_stop hysteria-server
         svc_start hysteria-server
         sleep 2
-        # 避免初次激活就拉取空数据导致懵逼
         yellow "  流量统计功能已激活！"
         yellow "  (注意：由于服务刚刚重启，所有历史流量已清空，请稍后重新连接并产生流量后再来查看)"
         echo ""
@@ -1029,27 +1034,24 @@ EOF
     
     if [[ -z "$traffic_data" || "$traffic_data" =~ "404" ]]; then
         red "  获取数据失败，Hysteria 服务可能未正常运行。"
-    elif [[ ! "$traffic_data" =~ '"tx"' ]]; then
-        yellow "  暂无任何流量消耗记录或客户端连接。"
     else
-        local client_count=$(echo "$traffic_data" | grep -o '"[^"]*":{[^}]*}' | grep -c '"tx"')
-        green "  当前活跃客户端总数: $client_count"
-        echo ""
-        print_line
-        
-        echo "$traffic_data" | grep -o '"[^"]*":{[^}]*}' | grep '"tx"' | while read -r line; do
-            user=$(echo "$line" | cut -d '"' -f2)
-            tx=$(echo "$line" | grep -o '"tx":[0-9]*' | cut -d: -f2)
-            rx=$(echo "$line" | grep -o '"rx":[0-9]*' | cut -d: -f2)
-            
-            [[ -z $tx ]] && tx=0
-            [[ -z $rx ]] && rx=0
-            
-            tx_mb=$(awk "BEGIN {printf \"%.2f\", $tx/1048576}")
-            rx_mb=$(awk "BEGIN {printf \"%.2f\", $rx/1048576}")
-            
-            yellow "  账号: $user | 发送: $tx_mb MB | 接收: $rx_mb MB"
-        done
+        # Python 高级健壮性 JSON 解析
+        python3 -c "
+import sys, json
+try:
+    data = json.loads('''$traffic_data''')
+    if not data:
+        print('\033[33m  暂无任何流量消耗记录或客户端连接。\033[0m')
+    else:
+        print('\033[32m  当前活跃客户端总数: ' + str(len(data)) + '\033[0m\n')
+        print('\033[32m ──────────────────────────────────────────────────────────\033[0m')
+        for user, stats in data.items():
+            tx_mb = stats.get('tx', 0) / 1048576
+            rx_mb = stats.get('rx', 0) / 1048576
+            print(f'\033[33m  账号: {user} | 发送: {tx_mb:.2f} MB | 接收: {rx_mb:.2f} MB\033[0m')
+except Exception as e:
+    print('\033[31m  JSON 解析失败，获取流量数据异常！\033[0m')
+"
     fi
     
     echo ""
@@ -1105,10 +1107,12 @@ enable_bbr() {
         sleep 3; return
     fi
 
-    # 尝试加载模块并检测是否成功 (修复 LXC 报错满屏的问题)
+    # 深度判定：加载模块 || 检测内核直编支持
     if ! modprobe tcp_bbr 2>/dev/null; then
-        red "  [错误] 当前系统/内核 (可能是 LXC 容器) 不支持加载 BBR 模块！"
-        sleep 3; return
+        if ! grep -q "bbr" /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+            red "  [错误] 当前系统/内核 (可能是 LXC 容器) 彻底不支持 BBR 模块！"
+            sleep 3; return
+        fi
     fi
     
     sed -i '/^net\.core\.default_qdisc/d' /etc/sysctl.conf
@@ -1152,7 +1156,6 @@ check_cert() {
         return
     fi
 
-    # 从配置文件中提取证书路径
     local cert_path=$(grep -w 'cert:' /etc/hysteria/config.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
 
     if [[ -z "$cert_path" || ! -f "$cert_path" ]]; then
@@ -1163,9 +1166,7 @@ check_cert() {
         purple "  所在路径: $cert_path"
         echo ""
         
-        # 依赖 openssl 解析证书内容
         if command -v openssl >/dev/null 2>&1; then
-            # 提取证书信息
             local cert_subject=$(openssl x509 -in "$cert_path" -noout -subject 2>/dev/null | awk -F'CN = |CN=' '{print $2}' | awk -F',' '{print $1}')
             local cert_issuer=$(openssl x509 -in "$cert_path" -noout -issuer 2>/dev/null | awk -F'CN = |CN=|O = |O=' '{print $2}' | awk -F',' '{print $1}')
             local cert_start=$(openssl x509 -in "$cert_path" -noout -startdate 2>/dev/null | cut -d= -f2)
@@ -1175,7 +1176,6 @@ check_cert() {
             yellow "  ▶ 证书颁发机构    : ${cert_issuer:-未知}"
             yellow "  ▶ 证书生效日期    : $cert_start"
             
-            # 尝试计算剩余过期天数
             local end_epoch=$(date -d "$cert_end" +%s 2>/dev/null)
             local now_epoch=$(date +%s 2>/dev/null)
             if [[ -n "$end_epoch" && -n "$now_epoch" && "$end_epoch" =~ ^[0-9]+$ ]]; then
@@ -1191,7 +1191,6 @@ check_cert() {
                 yellow "  ▶ 证书过期日期    : $cert_end"
             fi
             
-            # 判断证书类型给予提示
             if [[ "$cert_subject" == "www.bing.com" ]]; then
                 echo ""
                 yellow "  ℹ 提示: 当前使用的是系统自动生成的【必应自签伪装证书】。"
@@ -1222,7 +1221,7 @@ menu() {
     echo -e "${LIGHT_GREEN}  ██████╔╝ ╚██████╔╝ ╚██████╔╝███████╗ ██║  ██║${PLAIN}"
     echo -e "${LIGHT_GREEN}  ╚═════╝   ╚══════╝  ╚═════╝ ╚══════╝ ╚═╝  ╚═╝${PLAIN}"
     green "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
-    green " 项目名称 ：Hysteria 2 一键部署与管理脚本 (排障透明日志版)"
+    green " 项目名称 ：Hysteria 2 一键部署与管理脚本 (深度加固版)"
     purple " 项目地址 ：哆啦的Github库 https://github.com/yanbinlti-glitch"
     green "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
     yellow " 脚本快捷方式：hy2 (已自动配置，下次可在终端直接输入 hy2 启动)"
