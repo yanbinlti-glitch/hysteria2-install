@@ -6,24 +6,18 @@ export LANG=en_US.UTF-8
 RED="\033[31m"
 GREEN="\033[32m"
 YELLOW="\033[33m"
-BLUE="\033[34m"
 PURPLE="\033[35m"
-CYAN="\033[36m"
 
 LIGHT_RED="\033[1;31m"
 LIGHT_GREEN="\033[1;32m"
 LIGHT_YELLOW="\033[1;33m"
-LIGHT_BLUE="\033[1;34m"
 LIGHT_PURPLE="\033[1;35m"
-LIGHT_CYAN="\033[1;36m"
 
 PLAIN="\033[0m"
 
 red(){ echo -e "${LIGHT_RED}$1${PLAIN}"; }
 green(){ echo -e "${LIGHT_GREEN}$1${PLAIN}"; }
 yellow(){ echo -e "${LIGHT_YELLOW}$1${PLAIN}"; }
-cyan(){ echo -e "${LIGHT_CYAN}$1${PLAIN}"; }
-blue(){ echo -e "${LIGHT_BLUE}$1${PLAIN}"; }
 purple(){ echo -e "${LIGHT_PURPLE}$1${PLAIN}"; }
 
 # 判断系统及定义系统安装依赖方式
@@ -92,38 +86,38 @@ check_env() {
     green " =========================================================="
     green " 当前操作系统: $SYSTEM"
     yellow " 正在检查 Hysteria 2 及附加服务所需的前置依赖包..."
-    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+    green " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     
     local cmds=("curl" "wget" "sudo" "ss" "iptables" "python3" "openssl" "socat" "qrencode")
     local missing=0
 
     for cmd in "${cmds[@]}"; do
         if ! command -v "$cmd" &> /dev/null; then
-            echo -e "   ${LIGHT_RED}[✘] 缺失:${PLAIN}  ${LIGHT_YELLOW}【 $cmd 】${PLAIN}"
+            red "   [✘] 缺失:  $cmd"
             missing=1
         else
-            echo -e "   ${LIGHT_GREEN}[✔] 正常:${PLAIN}  ${LIGHT_CYAN}【 $cmd 】${PLAIN}"
+            green "   [✔] 正常:  $cmd"
         fi
     done
 
     if ! command -v crontab &> /dev/null; then
-        echo -e "   ${LIGHT_RED}[✘] 缺失:${PLAIN}  ${LIGHT_YELLOW}【 crontab 】${PLAIN} (用于证书自动续期)"
+        red "   [✘] 缺失:  crontab (用于证书自动续期)"
         missing=1
     else
-        echo -e "   ${LIGHT_GREEN}[✔] 正常:${PLAIN}  ${LIGHT_CYAN}【 crontab 】${PLAIN}"
+        green "   [✔] 正常:  crontab"
     fi
 
     if [[ $SYSTEM == "Debian" || $SYSTEM == "Ubuntu" ]]; then
         if ! command -v netfilter-persistent &> /dev/null; then
-            echo -e "   ${LIGHT_RED}[✘] 缺失:${PLAIN}  ${LIGHT_YELLOW}【 netfilter-persistent 】${PLAIN} (用于防火墙保存)"
+            red "   [✘] 缺失:  netfilter-persistent (用于防火墙保存)"
             missing=1
         else
-            echo -e "   ${LIGHT_GREEN}[✔] 正常:${PLAIN}  ${LIGHT_CYAN}【 netfilter-persistent 】${PLAIN}"
+            green "   [✔] 正常:  netfilter-persistent"
         fi
     fi
 
     if [[ $missing -eq 1 ]]; then
-        cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+        green " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
         yellow " 发现缺失前置组件，正在为您自动拉取安装，请查看下方日志..."
         
         if [[ ! $SYSTEM == "CentOS" ]]; then
@@ -148,7 +142,7 @@ check_env() {
         
         green " 所有前置依赖补全完成！"
     else
-        cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+        green " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
         green " 所有前置依赖检查通过，环境完美，无需额外安装！"
     fi
     sleep 2
@@ -166,10 +160,10 @@ inst_cert(){
     green " =========================================================="
     green "                     Hysteria 2 证书配置                   "
     green " =========================================================="
-    green  "   [1] 必应自签证书 (推荐小白，默认)"
-    purple "   [2] Acme 脚本申请 (需 Cloudflare 域名托管)"
-    cyan   "   [3] 自定义证书路径"
-    cyan   " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+    echo -e "   ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}必应自签证书 (推荐小白，默认)${PLAIN}"
+    echo -e "   ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_PURPLE}Acme 脚本申请 (需 Cloudflare 域名托管)${PLAIN}"
+    echo -e "   ${LIGHT_GREEN}[3]${PLAIN} ${LIGHT_YELLOW}自定义证书路径${PLAIN}"
+    green " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     read -rp " 请输入选项 [1-3] (默认1): " certInput
     [[ -z $certInput ]] && certInput=1
     
@@ -199,10 +193,10 @@ inst_cert(){
                 fi
             fi
 
-            cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+            green " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
             yellow " 准备使用 Cloudflare DNS API 申请证书"
             purple " 推荐在 CF控制台 -> 我的个人资料 -> API 令牌 中获取 Token"
-            cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+            green " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
             read -p " 请选择认证方式 [1. API Token (推荐) | 2. Global API Key]: " cf_auth_choice
             [[ -z $cf_auth_choice ]] && cf_auth_choice=1
 
@@ -275,7 +269,7 @@ inst_cert(){
 }
 
 inst_port(){
-    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+    green " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     read -p " 设置 Hysteria 2 节点端口 [1-65535] (回车随机)：" port
     [[ -z $port ]] && port=$(shuf -i 2000-65535 -n 1)
     
@@ -303,8 +297,8 @@ inst_port(){
 
 inst_jump(){
     yellow " 端口模式选择："
-    green  "   [1] 单端口直连 (默认)"
-    purple "   [2] 端口跳跃模式 (防封锁黑科技)"
+    echo -e "   ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}单端口直连 (默认)${PLAIN}"
+    echo -e "   ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_PURPLE}端口跳跃模式 (防封锁黑科技)${PLAIN}"
     read -rp " 请输入选项 [1-2] (默认1): " jumpInput
     if [[ $jumpInput == 2 ]]; then
         read -p " 请输入起始端口 (建议10000-65535)：" firstport
@@ -331,7 +325,7 @@ inst_jump(){
 }
 
 inst_sub_port(){
-    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+    green " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     read -p " 设置智能订阅服务端口 [1024-65535] (回车随机)：" sub_port_input
     [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 10000-30000 -n 1)
     
@@ -366,7 +360,7 @@ inst_node_name(){
 }
 
 inst_bandwidth(){
-    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+    green " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     yellow " 拥塞控制配置 (降低延迟的核心)"
     purple " Hysteria 2 的 Brutal 算法需知晓服务器最大带宽。"
     read -p " 请输入 VPS 最大 上行带宽 (Mbps, 回车默认 1000)：" bw_up_input
@@ -387,7 +381,7 @@ inst_bandwidth(){
 }
 
 inst_obfs(){
-    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+    green " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     yellow " 防阻断混淆(Obfuscation)配置"
     purple " 开启 Salamander 混淆可防运营商 QoS 限速与封锁。"
     read -p " 是否开启混淆？(y/n) [默认: y]: " enable_obfs
@@ -633,11 +627,11 @@ showconf(){
     yellow " --- [智能订阅链接] (推荐) ---"
     purple " 适用客户端: Clash Verge / v2rayN / Shadowrocket"
     green  " 订阅地址: ${sub_url}"
-    cyan   " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+    green " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     yellow " --- [单节点直连链接] ---"
     purple " 适用客户端: NekoBox / v2rayNG (直接导入)"
     green  " 节点地址: ${raw_url}"
-    cyan   " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+    green " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     
     if ! command -v qrencode &> /dev/null; then
         yellow " 正在加载二维码模块..."
@@ -661,10 +655,10 @@ showconf(){
         curl -s -d "$raw_url" https://qrenco.de
     fi
     
-    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+    green " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     yellow " 使用说明："
-    purple " [1] 打开 Shadowrocket 或 v2rayNG 扫一扫功能直接扫码。"
-    purple " [2] 智能订阅会自动识别客户端！Clash 获取 YAML，v2rayN 获取 Base64。"
+    echo -e " ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_PURPLE}打开 Shadowrocket 或 v2rayNG 扫一扫功能直接扫码。${PLAIN}"
+    echo -e " ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_PURPLE}智能订阅会自动识别客户端！Clash 获取 YAML，v2rayN 获取 Base64。${PLAIN}"
     read -p " 按回车键返回主菜单..."
     menu
 }
@@ -682,7 +676,7 @@ edit_config() {
     green "                 当前 Hysteria 2 节点配置                  "
     green " =========================================================="
     cat /etc/hysteria/config.yaml
-    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+    green " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     read -p " 是否需要修改配置文件？(y/n) [默认: n]: " edit_choice
     if [[ "$edit_choice" == "y" || "$edit_choice" == "Y" ]]; then
         if command -v nano >/dev/null; then
@@ -745,7 +739,7 @@ EOF
     else
         local client_count=$(echo "$traffic_data" | grep -o '"[^"]*":{[^}]*}' | grep -c '"tx"')
         green " 当前活跃客户端总数: $client_count"
-        cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+        green " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
         
         echo "$traffic_data" | grep -o '"[^"]*":{[^}]*}' | grep '"tx"' | while read -r line; do
             user=$(echo "$line" | cut -d '"' -f2)
@@ -777,7 +771,7 @@ insthysteria(){
     done
     echo "$api_port" > /etc/hysteria/api_port.txt
     
-    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+    green " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     green " 正在下载 Hysteria 2 二进制核心..."
     arch=$(uname -m)
     case $arch in
@@ -904,7 +898,7 @@ EOF
     
     generate_client_configs
     
-    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+    green " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     green " Hysteria 2 服务端及智能订阅安装部署完成！"
     purple " 请在主菜单选择 [ 5 ] 获取节点与二维码。"
     sleep 3
@@ -975,11 +969,11 @@ hysteriaswitch(){
     green " =========================================================="
     green "                     服务运行状态控制                      "
     green " =========================================================="
-    cyan   "   [1] 启动 Hysteria 2 及订阅服务"
-    red    "   [2] 停止 Hysteria 2 及订阅服务"
-    cyan   "   [3] 重启 Hysteria 2 及订阅服务"
-    cyan   " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
-    purple "   [0] 返回主菜单"
+    echo -e "   ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}启动 Hysteria 2 及订阅服务${PLAIN}"
+    echo -e "   ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_RED}停止 Hysteria 2 及订阅服务${PLAIN}"
+    echo -e "   ${LIGHT_GREEN}[3]${PLAIN} ${LIGHT_YELLOW}重启 Hysteria 2 及订阅服务${PLAIN}"
+    green " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+    echo -e "   ${LIGHT_GREEN}[0]${PLAIN} ${LIGHT_PURPLE}返回主菜单${PLAIN}"
     read -rp " 请输入选项 [0-3]: " switchInput
     case $switchInput in
         1 ) starthysteria ;;
@@ -991,7 +985,7 @@ hysteriaswitch(){
 }
 
 enable_bbr(){
-    cyan  " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+    green " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     local kernel_v=$(uname -r | cut -d. -f1)
     if [[ "$kernel_v" -lt 4 ]]; then
         red " 当前内核版本过低 ($(uname -r))，不支持开启 BBR！"
@@ -1031,19 +1025,19 @@ menu() {
     green "         Hysteria 2 一键部署与管理脚本 (极致优化版)        "
     green " =========================================================="
     yellow " --- [核心功能] ---"
-    green  "   [1] 安装部署 Hysteria 2"
-    red    "   [2] 彻底卸载 Hysteria 2"
-    cyan   " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+    echo -e "   ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}安装部署 Hysteria 2${PLAIN}"
+    echo -e "   ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_RED}彻底卸载 Hysteria 2${PLAIN}"
+    green " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     yellow " --- [服务管理] ---"
-    cyan   "   [3] 启动 / 停止 / 重启服务"
-    purple "   [4] 查看 / 修改 配置文件"
-    cyan   " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+    echo -e "   ${LIGHT_GREEN}[3]${PLAIN} ${LIGHT_YELLOW}启动 / 停止 / 重启服务${PLAIN}"
+    echo -e "   ${LIGHT_GREEN}[4]${PLAIN} ${LIGHT_PURPLE}查看 / 修改 配置文件${PLAIN}"
+    green " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
     yellow " --- [实用工具] ---"
-    green  "   [5] 获取 节点配置 与 订阅链接"
-    cyan   "   [6] 查看 客户端连接 与 流量统计"
-    purple "   [7] 开启 BBR 及 UDP 缓冲区加速 (推荐)"
-    cyan   " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
-    red    "   [0] 退出脚本"
+    echo -e "   ${LIGHT_GREEN}[5]${PLAIN} ${LIGHT_GREEN}获取 节点配置 与 订阅链接${PLAIN}"
+    echo -e "   ${LIGHT_GREEN}[6]${PLAIN} ${LIGHT_YELLOW}查看 客户端连接 与 流量统计${PLAIN}"
+    echo -e "   ${LIGHT_GREEN}[7]${PLAIN} ${LIGHT_PURPLE}开启 BBR 及 UDP 缓冲区加速 (推荐)${PLAIN}"
+    green " ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+    echo -e "   ${LIGHT_GREEN}[0]${PLAIN} ${LIGHT_RED}退出脚本${PLAIN}"
     read -rp " 请输入选项 [0-7]: " menuInput
     case $menuInput in
         1 ) insthysteria ;;
