@@ -4,7 +4,7 @@ export LANG=en_US.UTF-8
 export DEBIAN_FRONTEND=noninteractive
 
 # =================================================================
-#  1. 现代化极简 UI 色彩库 (严格遵循: 绿/红/黄/紫)
+#  1. 现代化极简 UI 色彩库
 # =================================================================
 RED="\033[31m"
 GREEN="\033[32m"
@@ -31,7 +31,7 @@ print_line() {
 # =================================================================
 [[ $EUID -ne 0 ]] && red " [错误] 请在 root 用户下运行此脚本！" && exit 1
 
-# [修复1]: 安全提取脚本路径，防止 curl 管道符导致的 /usr/local/bin/hy2 覆盖为 bash 二进制
+# 安全提取脚本路径
 SCRIPT_PATH=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
 if [[ -f "$SCRIPT_PATH" && "$(head -n 1 "$SCRIPT_PATH" 2>/dev/null)" == "#!/bin/bash" ]]; then
     if [[ "$SCRIPT_PATH" != "/usr/local/bin/hy2" ]]; then
@@ -40,7 +40,6 @@ if [[ -f "$SCRIPT_PATH" && "$(head -n 1 "$SCRIPT_PATH" 2>/dev/null)" == "#!/bin/
     fi
 fi
 
-# [修复2]: 移除 amazon linux 周围多余的单引号，防止正则匹配失败
 REGEX=("alpine" "debian" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "amazon linux" "fedora")
 RELEASE=("Alpine" "Debian" "Ubuntu" "CentOS" "CentOS" "Fedora")
 PACKAGE_UPDATE=("apk update" "apt-get update" "apt-get update" "yum -y update" "yum -y update" "yum -y update")
@@ -68,12 +67,15 @@ if [[ -z $(type -P curl) ]]; then
 fi
 
 realip() {
-    ip=$(curl -s --max-time 3 ip.sb -k | grep -m 1 -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}|([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:)*:[0-9a-fA-F]{1,4}")
+    # 强制优先获取 IPv4，避免双栈环境误伤
+    ip=$(curl -s4m3 api.ipify.org -k || curl -s4m3 ifconfig.me -k || curl -s4m3 ip.sb -k)
     
+    # 降级尝试获取 IPv6 (纯 IPv6 环境)
     if [[ -z "$ip" ]]; then
-        ip=$(curl -s4m3 api.ipify.org -k || curl -s6m3 api64.ipify.org -k || curl -s4m3 ifconfig.me -k || curl -s6m3 ifconfig.me -k)
-        ip=$(echo "$ip" | grep -m 1 -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}|([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:)*:[0-9a-fA-F]{1,4}")
+        ip=$(curl -s6m3 api64.ipify.org -k || curl -s6m3 ifconfig.me -k || curl -s6m3 ip.sb -k)
     fi
+    
+    ip=$(echo "$ip" | grep -m 1 -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}|([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:)*:[0-9a-fA-F]{1,4}")
     
     if [[ -z "$ip" ]]; then
         echo ""
@@ -125,7 +127,6 @@ open_port() {
 close_port() {
     local port=$1
     local proto=$2
-    # [修复5]: 屏蔽标准错误输出，防止端口未开放时删除操作产生的报错刷屏
     iptables -D INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null
     ip6tables -D INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null
     if command -v ufw >/dev/null; then ufw delete allow $port/$proto 2>/dev/null; fi
@@ -247,8 +248,8 @@ inst_cert() {
             domain=$(echo "$domain" | tr -d '\r' | tr -d ' ')
             green " 已记录域名：$domain"
             
-            # [修复3]: 使用环境变量注入来替代直接拼写进 Python 字符串，彻底封堵命令注入漏洞
-            domainIP=$(DOMAIN="$domain" python3 -c "import socket, os; print(socket.getaddrinfo(os.environ.get('DOMAIN'), None)[0][4][0])" 2>/dev/null || echo "")
+            # 双栈适配：优先提取 IPv4 进行核对
+            domainIP=$(DOMAIN="$domain" python3 -c "import socket, os; try: addrs=socket.getaddrinfo(os.environ.get('DOMAIN'), None); ips=[a[4][0] for a in addrs]; v4=[ip for ip in ips if '.' in ip]; print(v4[0] if v4 else ips[0]) except: print('')" 2>/dev/null || echo "")
             
             if [[ -z "$domainIP" ]]; then
                 echo ""
@@ -316,10 +317,11 @@ inst_cert() {
             bash /root/.acme.sh/acme.sh --issue --dns dns_cf -d "${domain}" -k ec-256
             mkdir -p /var/www/hysteria/certs
 
+            # 使用 try-restart 增强鲁棒性
             if [[ $SYSTEM == "Alpine" ]]; then
                 local reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && chown -R nobody /var/www/hysteria/certs && if rc-service hysteria-server status | grep -q 'started'; then rc-service hysteria-server restart; fi && if rc-service hysteria-sub status | grep -q 'started'; then rc-service hysteria-sub restart; fi"
             else
-                local reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && chown -R nobody /var/www/hysteria/certs && if systemctl is-active --quiet hysteria-server; then systemctl restart hysteria-server; fi && if systemctl is-active --quiet hysteria-sub; then systemctl restart hysteria-sub; fi"
+                local reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && chown -R nobody /var/www/hysteria/certs && if systemctl list-unit-files | grep -q hysteria-server; then systemctl try-restart hysteria-server; fi && if systemctl list-unit-files | grep -q hysteria-sub; then systemctl try-restart hysteria-sub; fi"
             fi
             
             bash /root/.acme.sh/acme.sh --install-cert -d "${domain}" --key-file /root/private.key --fullchain-file /root/cert.crt --ecc --reloadcmd "$reload_cmd"
@@ -425,6 +427,12 @@ inst_port() {
         modprobe ip6table_nat 2>/dev/null || true
         iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop" 2>/dev/null
         ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop" 2>/dev/null
+        
+        # 兼容 IPv6 NAT 缺失的系统
+        if [[ $? -ne 0 ]]; then
+            yellow "  [提示] 当前系统/内核可能不支持 IPv6 NAT，IPv6 端口跳跃已静默跳过。"
+        fi
+
         if command -v ufw >/dev/null; then ufw allow $firstport:$endport/udp 2>/dev/null; fi
         if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
             firewall-cmd --zone=public --add-port=$firstport-$endport/udp --permanent 2>/dev/null
@@ -474,7 +482,7 @@ inst_other_configs() {
     [[ -z $proxysite ]] && proxysite="www.bing.com"
 
     echo ""
-    echo -en " ${LIGHT_YELLOW} ▶ 节点显示名称 (勿含空格特殊字符) [回车默认 Hysteria2_Node]: ${PLAIN}"
+    echo -en " ${LIGHT_YELLOW} ▶ 节点显示名称 [回车默认 Hysteria2_Node]: ${PLAIN}"
     read custom_node_name
     [[ -z $custom_node_name ]] && custom_node_name="Hysteria2_Node"
 
@@ -561,11 +569,14 @@ clean_env() {
         done
     fi
 
+    # 清除端口跳跃残留的 INPUT 规则
     if [[ -f /etc/hysteria/port_hop.txt ]]; then
         local hop_range=$(cat /etc/hysteria/port_hop.txt | tr -d '\r')
         local f_port=$(echo "$hop_range" | cut -d':' -f1)
         local e_port=$(echo "$hop_range" | cut -d':' -f2)
         if [[ -n "$f_port" && -n "$e_port" ]]; then
+            iptables -D INPUT -p udp --dport "$f_port:$e_port" -j ACCEPT 2>/dev/null
+            ip6tables -D INPUT -p udp --dport "$f_port:$e_port" -j ACCEPT 2>/dev/null
             if command -v ufw >/dev/null; then ufw delete allow "$f_port:$e_port/udp" 2>/dev/null; fi
             if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
                 firewall-cmd --zone=public --remove-port="$f_port-$e_port/udp" --permanent 2>/dev/null
@@ -600,7 +611,14 @@ clean_env() {
 
 generate_client_configs() {
     realip
-    local s_pwd=$(grep 'password:' /etc/hysteria/config.yaml | head -n 1 | awk '{print $2}')
+    
+    # 稳健的密码提取，剥离双引号
+    local raw_pwd=$(awk '/^auth:/,0' /etc/hysteria/config.yaml | grep -E '^[[:space:]]*password:' | head -n 1 | sed 's/.*password:[[:space:]]*//; s/["'\''\r]//g')
+    
+    # 彻底的 URL Safe 编码处理 (避免特殊字符断裂 URI)
+    local s_pwd=$(PWD="$raw_pwd" python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ.get('PWD', '')))")
+    local safe_node_name=$(NAME="$custom_node_name" python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ.get('NAME', '')))")
+    
     local c_domain=$(grep 'sni:' /etc/hysteria/hy-client.yaml | awk '{print $2}')
     [[ -z "$c_domain" ]] && c_domain="www.bing.com"
     
@@ -623,18 +641,12 @@ generate_client_configs() {
     fi
 
     local obfs_param=""
-    local clash_obfs_block=""
     if [[ -n "$s_obfs_pwd" ]]; then
         obfs_param="&obfs=salamander&obfs-password=${s_obfs_pwd}"
-        clash_obfs_block="    obfs: salamander\n    obfs-password: \"$s_obfs_pwd\""
     fi
 
     local c_up=$(cat /etc/hysteria/c_up.txt || echo "0")
     local c_down=$(cat /etc/hysteria/c_down.txt || echo "0")
-    local clash_bw_block=""
-    if [[ "$c_up" != "0" ]]; then
-        clash_bw_block="    up: '${c_up} mbps'\n    down: '${c_down} mbps'"
-    fi
 
     local yaml_json_ip="$ip"
     local uri_ip="$ip"
@@ -655,10 +667,11 @@ generate_client_configs() {
     mkdir -p "$web_dir/$sub_uuid"
     echo "$sub_uuid" > /etc/hysteria/sub_path.txt
 
-    local url="hy2://$s_pwd@$uri_ip:$primary_port/?insecure=${is_insecure_url}&sni=$c_domain${mport_param}${obfs_param}#${custom_node_name}"
+    local url="hy2://$s_pwd@$uri_ip:$primary_port/?insecure=${is_insecure_url}&sni=$c_domain${mport_param}${obfs_param}#${safe_node_name}"
     echo "$url" > "$web_dir/$sub_uuid/url.txt"
     
-    printf "%s" "$url" | base64 | tr -d '\r\n' > "$web_dir/$sub_uuid/sub_b64.txt"
+    # Base64 去换行符保险策略
+    printf "%s" "$url" | base64 -w 0 2>/dev/null > "$web_dir/$sub_uuid/sub_b64.txt" || printf "%s" "$url" | base64 | tr -d '\r\n' > "$web_dir/$sub_uuid/sub_b64.txt"
 
     cat << EOF > "$web_dir/$sub_uuid/clash-meta-sub.yaml"
 port: 7890
@@ -674,13 +687,15 @@ proxies:
     server: "$yaml_json_ip"
     port: $primary_port
 $([[ -n "$hop_ports" ]] && echo "    ports: '$hop_ports'")
-    password: "$s_pwd"
+    password: "$raw_pwd"
     sni: "$c_domain"
     skip-cert-verify: $clash_cert_verify
     alpn:
       - h3
-$(echo -e "$clash_obfs_block")
-$(echo -e "$clash_bw_block")
+$([[ -n "$s_obfs_pwd" ]] && echo "    obfs: salamander
+    obfs-password: \"$s_obfs_pwd\"")
+$([[ "$c_up" != "0" ]] && echo "    up: '${c_up} mbps'
+    down: '${c_down} mbps'")
 
 proxy-groups:
   - name: "节点选择"
@@ -705,7 +720,7 @@ EOF
     chown -R nobody "$sub_cert_dir"
     chmod 400 "$sub_cert_dir/private.key"
     
-    # [修复6]: 重写 Python DualStackServer，优雅解决双栈绑定与 IPv4 后备问题
+    # 多线程防阻塞的 ThreadingTCPServer
     cat << EOF > "$web_dir/server.py"
 import http.server
 import socketserver
@@ -754,7 +769,8 @@ class SecureSubHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"<html><head><title>403 Forbidden</title></head><body><center><h1>403 Forbidden</h1></center><hr><center>nginx</center></body></html>")
 
-class DualStackServer(socketserver.TCPServer):
+class DualStackServer(socketserver.ThreadingTCPServer):
+    daemon_threads = True
     allow_reuse_address = True
     address_family = getattr(socket, 'AF_INET6', socket.AF_INET)
 
@@ -769,7 +785,6 @@ class DualStackServer(socketserver.TCPServer):
 try:
     httpd = DualStackServer(("", PORT), SecureSubHandler)
 except OSError:
-    # 回退到纯 IPv4 模式，防止 IPv6 完全缺失的机器报错
     DualStackServer.address_family = socket.AF_INET
     httpd = DualStackServer(("0.0.0.0", PORT), SecureSubHandler)
 
@@ -908,9 +923,6 @@ EOF
     fi
     echo "$cert_insecure_url" > /etc/hysteria/insecure_state.txt
 
-    # ===============================
-    # 核心配置文件注入逻辑 (融合所有进阶优化)
-    # ===============================
     cat << EOF > /etc/hysteria/config.yaml
 listen: :$port
 
@@ -947,6 +959,8 @@ resolver:
 
 acl:
   inline:
+    - reject(169.254.0.0/16)
+    - reject(::1/128)
     - reject(127.0.0.0/8)
     - reject(10.0.0.0/8)
     - reject(172.16.0.0/12)
@@ -984,6 +998,14 @@ EOF
     svc_start hysteria-server
     
     generate_client_configs
+    
+    sleep 2
+    if ! ss -unl | grep -E -q ":$port( |$)"; then
+        echo ""
+        red " [致命错误] 服务端未能成功启动，端口 $port 未被监听！"
+        yellow " 请使用命令: journalctl -u hysteria-server -e 检查报错日志 (可能是证书路径错误或端口冲突)。"
+        exit 1
+    fi
     
     echo ""
     print_line
@@ -1289,19 +1311,20 @@ enable_bbr() {
         fi
     fi
     
-    # 动态计算 UDP 缓冲区，防止小内存 VPS(如 512M) 发生 OOM 崩溃
     local total_mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
-    local mem_pages=$(( total_mem_kb / 4 ))
     
-    # 限制 UDP 最大占用物理内存的 25%
+    # 获取系统动态页面大小，规避 ARM64 的 OOM 问题
+    local page_size=$(getconf PAGESIZE 2>/dev/null)
+    [[ -z "$page_size" || ! "$page_size" =~ ^[0-9]+$ ]] && page_size=4096
+    
+    local mem_pages=$(( total_mem_kb * 1024 / page_size ))
+    
     local udp_max=$(( mem_pages / 4 ))
-    # 设定安全底线，防止由于内存太小导致算出来的值不满足最低要求
     [[ $udp_max -lt 65536 ]] && udp_max=65536
     
     local udp_mid=$(( udp_max * 3 / 4 ))
     local udp_min=$(( udp_max / 2 ))
 
-    # [修复4]: 使用 /etc/sysctl.d 目录持久化并热重载，取代直接重定向写入 /etc/sysctl.conf
     mkdir -p /etc/sysctl.d
     cat << EOF > /etc/sysctl.d/99-hysteria-bbr.conf
 net.core.default_qdisc=fq
@@ -1315,7 +1338,6 @@ net.core.somaxconn=65535
 net.ipv4.udp_mem=$udp_min $udp_mid $udp_max
 EOF
     
-    # 兼容性重载：覆盖不同操作系统的 sysctl 应用方式
     sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-hysteria-bbr.conf >/dev/null 2>&1 || sysctl -p >/dev/null 2>&1
     
     echo ""
@@ -1347,7 +1369,6 @@ check_cert() {
 
     local has_error=0
 
-    # 1. 深度诊断：检查文件是否存在、大小及内容合法性
     if [[ -z "$cert_path" || -z "$key_path" ]]; then
         red "  [✘] 配置文件中的证书路径为空！"
         yellow "  ▶ 报错原因: config.yaml 配置被破坏，或安装时参数未能正确写入。"
@@ -1392,7 +1413,6 @@ check_cert() {
 
     echo ""
 
-    # 2. 如果文件正常，进行密码学级别的匹配与过期诊断
     if [[ $has_error -eq 0 ]]; then
         if command -v openssl >/dev/null; then
             local cert_subject=$(openssl x509 -in "$cert_path" -noout -subject | awk -F'CN = |CN=' '{print $2}' | awk -F',' '{print $1}')
@@ -1407,7 +1427,8 @@ check_cert() {
             yellow "  ▶ 证书生效日期    : $cert_start"
 
             if command -v python3 >/dev/null; then
-                local days_left=$(python3 -c "import datetime; t=datetime.datetime.strptime('$cert_end', '%b %d %H:%M:%S %Y %Z'); print((t - datetime.datetime.now()).days)" 2>/dev/null)
+                # 过滤单数日期双空格问题
+                local days_left=$(python3 -c "import datetime; t_str = ' '.join('$cert_end'.split()); t=datetime.datetime.strptime(t_str, '%b %d %H:%M:%S %Y %Z'); print((t - datetime.datetime.now()).days)" 2>/dev/null)
             else
                 local end_epoch=$(date -d "$cert_end" +%s 2>/dev/null)
                 local now_epoch=$(date +%s 2>/dev/null)
