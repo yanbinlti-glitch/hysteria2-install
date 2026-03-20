@@ -86,7 +86,11 @@ realip() {
 
 gen_random_str() {
     local len=$1
-    cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -d '-' | cut -c 1-$len || head -c 16 /dev/urandom | od -A n -t x1 | tr -d ' \n' | cut -c 1-$len
+    local str=$(cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -d '-')
+    if [[ -z "$str" ]]; then
+        str=$(head -c 16 /dev/urandom | od -A n -t x1 | tr -d ' \n')
+    fi
+    echo "${str:0:$len}"
 }
 
 # =================================================================
@@ -319,9 +323,9 @@ inst_cert() {
 
             # 使用 try-restart 增强鲁棒性
             if [[ $SYSTEM == "Alpine" ]]; then
-                local reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && chown -R nobody /var/www/hysteria/certs && if rc-service hysteria-server status | grep -q 'started'; then rc-service hysteria-server restart; fi && if rc-service hysteria-sub status | grep -q 'started'; then rc-service hysteria-sub restart; fi"
+                local reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && chown -R nobody /var/www/hysteria/certs && (rc-service hysteria-server restart || true) && (rc-service hysteria-sub restart || true)"
             else
-                local reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && chown -R nobody /var/www/hysteria/certs && if systemctl list-unit-files | grep -q hysteria-server; then systemctl try-restart hysteria-server; fi && if systemctl list-unit-files | grep -q hysteria-sub; then systemctl try-restart hysteria-sub; fi"
+                local reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && chown -R nobody /var/www/hysteria/certs && (systemctl try-restart hysteria-server || true) && (systemctl try-restart hysteria-sub || true)"
             fi
             
             bash /root/.acme.sh/acme.sh --install-cert -d "${domain}" --key-file /root/private.key --fullchain-file /root/cert.crt --ecc --reloadcmd "$reload_cmd"
@@ -552,7 +556,7 @@ inst_other_configs() {
 clean_env() {
     local mode="$1"
     
-    local main_port=$(grep -E "^[[:space:]]*listen:" /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ' | tr -d '\r')
+    local main_port=$(grep -E "^[[:space:]]*listen:" /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ' | tr -d '\r' | tr -d '"')
     local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null | tr -d '\r')
 
     [[ -n "$main_port" && "$main_port" =~ ^[0-9]+$ ]] && close_port "$main_port" "udp"
@@ -926,9 +930,6 @@ EOF
     cat << EOF > /etc/hysteria/config.yaml
 listen: :$port
 
-quic:
-  mtu: 1400
-
 tls:
   cert: $cert_path
   key: $key_path
@@ -1010,7 +1011,7 @@ EOF
     echo ""
     print_line
     green "  Hysteria 2 服务端及智能订阅安装部署完成！"
-    purple "  请在主菜单选择 [5] 获取节点与二维码。"
+    purple "  请在主菜单选择 [6] 获取节点与二维码。"
     echo ""
     sleep 3
 }
@@ -1566,6 +1567,15 @@ config_outbound() {
     if grep -q "^outbound:" /etc/hysteria/config.yaml; then
         local current_type=$(awk '/^outbound:/{getline; print $2}' /etc/hysteria/config.yaml | tr -d '\r')
         yellow "  当前状态: [已开启] 落地代理模式 (类型: $current_type)"
+        
+        # 提取当前代理地址
+        local current_addr=""
+        if [[ "$current_type" == "socks5" ]]; then
+            current_addr=$(awk '/socks5:/{getline; print $2}' /etc/hysteria/config.yaml | tr -d '\r')
+        elif [[ "$current_type" == "http" ]]; then
+            current_addr=$(awk '/http:/{getline; print $2}' /etc/hysteria/config.yaml | tr -d '\r')
+        fi
+        [[ -n "$current_addr" ]] && green "  当前代理地址: $current_addr"
     else
         green "  当前状态: [未开启] 本机直连输出"
     fi
@@ -1573,10 +1583,11 @@ config_outbound() {
     
     echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}配置 / 修改 落地代理 (支持 SOCKS5 / HTTP)${PLAIN}"
     echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_RED}关闭 落地代理 (恢复本机 IP 直连输出)${PLAIN}"
+    echo -e "    ${LIGHT_GREEN}[3]${PLAIN} ${LIGHT_YELLOW}诊断 落地代理健康状态与 UDP 支持测试${PLAIN}"
     echo ""
     echo -e "    ${LIGHT_GREEN}[0]${PLAIN} ${LIGHT_PURPLE}返回主菜单${PLAIN}"
     echo ""
-    echo -en " ${LIGHT_YELLOW} ▶ 请输入选项 [0-2]: ${PLAIN}"
+    echo -en " ${LIGHT_YELLOW} ▶ 请输入选项 [0-3]: ${PLAIN}"
     read out_choice
 
     case $out_choice in
@@ -1598,17 +1609,40 @@ config_outbound() {
             read out_pass
             out_pass=$(echo "$out_pass" | tr -d '\r' | tr -d ' ')
 
-            # 备份原配置
+            yellow "  正在测试代理连通性 (连接外网中)..."
+            local curl_proxy=""
+            if [[ "$out_type" == "1" ]]; then
+                if [[ -n "$out_user" ]]; then
+                    curl_proxy="socks5h://${out_user}:${out_pass}@${out_addr}"
+                else
+                    curl_proxy="socks5h://${out_addr}"
+                fi
+            else
+                if [[ -n "$out_user" ]]; then
+                    curl_proxy="http://${out_user}:${out_pass}@${out_addr}"
+                else
+                    curl_proxy="http://${out_addr}"
+                fi
+            fi
+
+            local test_res=$(curl -x "$curl_proxy" -s -m 5 https://www.cloudflare.com/cdn-cgi/trace | grep "ip=")
+            if [[ -n "$test_res" ]]; then
+                green "  [✔] 代理测试成功！验证到出口 IP: ${test_res#ip=}"
+            else
+                red "  [✘] 代理测试失败！无法通过该代理连接外网 (请求超时或被拒绝)。"
+                echo -en " ${LIGHT_YELLOW} ▶ 代理可能无效或目标节点被封禁，是否强制保存并继续？(y/n) [默认: n]: ${PLAIN}"
+                read force_save
+                [[ "$force_save" != "y" && "$force_save" != "Y" ]] && { yellow "  已取消中转配置。"; sleep 2; return; }
+            fi
+
             cp -f /etc/hysteria/config.yaml /etc/hysteria/config.yaml.bak
 
-            # 安全清除旧的 outbound 配置块
             awk '
             /^outbound:/ { in_outbound=1; next }
             /^[a-zA-Z]/ { if(in_outbound) in_outbound=0 }
             { if(!in_outbound) print $0 }
             ' /etc/hysteria/config.yaml > /tmp/hy2_config_tmp.yaml
             
-            # 生成新的 outbound 配置块
             local out_block="outbound:\n"
             if [[ "$out_type" == "1" ]]; then
                 out_block+="  type: socks5\n  socks5:\n    addr: $out_addr\n"
@@ -1619,15 +1653,40 @@ config_outbound() {
                 out_block+="  type: http\n  http:\n    url: http://${auth_part}${out_addr}\n"
             fi
 
-            # 插入到 trafficStats 之前，如果没有则追加到末尾
             if grep -q "^trafficStats:" /tmp/hy2_config_tmp.yaml; then
-                sed -i '/^trafficStats:/i \'"$out_block"'' /tmp/hy2_config_tmp.yaml
+                awk -v block="$(echo -e "$out_block")" '/^trafficStats:/ {print block} {print}' /tmp/hy2_config_tmp.yaml > /tmp/hy2_config_tmp2.yaml
+                mv -f /tmp/hy2_config_tmp2.yaml /tmp/hy2_config_tmp.yaml
             else
                 echo -e "$out_block" >> /tmp/hy2_config_tmp.yaml
             fi
 
             mv -f /tmp/hy2_config_tmp.yaml /etc/hysteria/config.yaml
-            green "  已生成新的落地代理配置！"
+            green "  已生成并应用新的落地代理配置！"
+            
+            # 重启服务逻辑
+            echo ""
+            yellow "  正在重启 Hysteria 2 服务以使配置生效..."
+            svc_stop hysteria-server 2>/dev/null
+            svc_start hysteria-server
+
+            sleep 2
+
+            local is_active=0
+            if [[ $SYSTEM == "Alpine" ]]; then
+                rc-service hysteria-server status 2>/dev/null | grep -q 'started' && is_active=1
+            else
+                systemctl is-active --quiet hysteria-server 2>/dev/null && is_active=1
+            fi
+
+            if [[ $is_active -eq 1 ]]; then
+                green "  [✔] 重启成功！新的出口规则已生效。"
+            else
+                red "  [✘] 致命错误：服务启动失败！"
+                purple "  正在为您自动回滚到上一次的可用配置..."
+                mv -f /etc/hysteria/config.yaml.bak /etc/hysteria/config.yaml
+                svc_start hysteria-server
+                green "  [✔] 回滚完成，已恢复原状态。"
+            fi
             ;;
         2)
             cp -f /etc/hysteria/config.yaml /etc/hysteria/config.yaml.bak
@@ -1638,6 +1697,117 @@ config_outbound() {
             ' /etc/hysteria/config.yaml > /tmp/hy2_config_tmp.yaml
             mv -f /tmp/hy2_config_tmp.yaml /etc/hysteria/config.yaml
             green "  已清除落地代理配置，准备恢复本机直连。"
+            
+            svc_stop hysteria-server 2>/dev/null
+            svc_start hysteria-server
+            ;;
+        3)
+            echo ""
+            print_line
+            yellow "  ▶ 正在诊断中转代理健康状态与实时日志..."
+            if ! grep -q "^outbound:" /etc/hysteria/config.yaml; then
+                red "  当前未开启落地代理，无法诊断。"
+            else
+                local current_type=$(awk '/^outbound:/{getline; print $2}' /etc/hysteria/config.yaml | tr -d '\r')
+                local current_addr=""
+                local current_user=""
+                local current_pass=""
+                
+                if [[ "$current_type" == "socks5" ]]; then
+                    current_addr=$(awk '/socks5:/{getline; print $2}' /etc/hysteria/config.yaml | awk '/addr:/{print $2}' | tr -d '\r')
+                    current_user=$(awk '/socks5:/{getline; getline; print $0}' /etc/hysteria/config.yaml | awk '/username:/{print $2}' | tr -d '\r')
+                    current_pass=$(awk '/socks5:/{getline; getline; getline; print $0}' /etc/hysteria/config.yaml | awk '/password:/{print $2}' | tr -d '\r')
+                elif [[ "$current_type" == "http" ]]; then
+                    local http_url=$(awk '/http:/{getline; print $2}' /etc/hysteria/config.yaml | awk '/url:/{print $2}' | tr -d '\r')
+                    current_addr=$(echo "$http_url" | awk -F'//' '{print $2}')
+                    if [[ "$current_addr" == *"@"* ]]; then
+                        current_user=$(echo "$current_addr" | awk -F':' '{print $1}')
+                        current_pass=$(echo "$current_addr" | awk -F':' '{print $2}' | awk -F'@' '{print $1}')
+                        current_addr=$(echo "$current_addr" | awk -F'@' '{print $2}')
+                    fi
+                fi
+
+                local curl_proxy=""
+                if [[ "$current_type" == "socks5" ]]; then
+                    [[ -n "$current_user" ]] && curl_proxy="socks5h://${current_user}:${current_pass}@${current_addr}" || curl_proxy="socks5h://${current_addr}"
+                    green "  代理类型: SOCKS5 (理论上支持 TCP & UDP 中转)"
+                else
+                    [[ -n "$current_user" ]] && curl_proxy="http://${current_user}:${current_pass}@${current_addr}" || curl_proxy="http://${current_addr}"
+                    yellow "  代理类型: HTTP (警告: 标准 HTTP 代理原生不支持 UDP 转发，可能导致 UDP 流量断流或异常)"
+                fi
+
+                echo ""
+                yellow "  [1/3] 正在测试外网 TCP 连通性..."
+                local test_ip=$(curl -x "$curl_proxy" -s -m 5 https://api.ipify.org)
+                if [[ -n "$test_ip" ]]; then
+                    green "  [✔] TCP 连通性测试通过！当前中转出口真实 IP: $test_ip"
+                else
+                    red "  [✘] TCP 连通性测试失败！中转服务器无响应、被墙或验证失败。"
+                fi
+
+                echo ""
+                yellow "  [2/3] 正在深度检测 UDP 协议底层转发支持度..."
+                if [[ "$current_type" == "socks5" ]]; then
+                    # 生成临时 Python 探针，发送 UDP ASSOCIATE 请求
+                    cat << 'EOF' > /tmp/udp_test.py
+import socket, struct, sys
+try:
+    proxy_ip = sys.argv[1]
+    proxy_port = int(sys.argv[2])
+    user = sys.argv[3] if len(sys.argv)>3 else ""
+    pwd = sys.argv[4] if len(sys.argv)>4 else ""
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(5)
+    s.connect((proxy_ip, proxy_port))
+
+    if user:
+        s.sendall(b"\x05\x01\x02")
+        if s.recv(2) != b"\x05\x02": raise Exception("SOCKS5 代理拒绝了账号密码验证模式")
+        req = b"\x01" + bytes([len(user)]) + user.encode() + bytes([len(pwd)]) + pwd.encode()
+        s.sendall(req)
+        if s.recv(2)[1] != 0: raise Exception("账号或密码错误")
+    else:
+        s.sendall(b"\x05\x01\x00")
+        if s.recv(2) != b"\x05\x00": raise Exception("此代理需要密码，但未配置")
+
+    s.sendall(b"\x05\x03\x00\x01\x00\x00\x00\x00\x00\x00")
+    res = s.recv(10)
+    if res[1] != 0: raise Exception("代理服务器主动拒绝了 UDP 转发请求 (该节点不支持 UDP)")
+    print("SUCCESS")
+except Exception as e:
+    print("FAIL: " + str(e))
+EOF
+                    local p_host=$(echo "$current_addr" | awk -F':' '{print $1}')
+                    local p_port=$(echo "$current_addr" | awk -F':' '{print $2}')
+                    
+                    local udp_res=$(python3 /tmp/udp_test.py "$p_host" "$p_port" "$current_user" "$current_pass" 2>/dev/null)
+                    
+                    if [[ "$udp_res" == *"SUCCESS"* ]]; then
+                        green "  [✔] 探针检测完毕: 该 SOCKS5 节点完美支持 UDP 转发流量！"
+                    else
+                        red "  [✘] UDP 转发被阻断或未开启！"
+                        red "  探针回传报错: ${udp_res#FAIL: }"
+                        purple "  【排错建议】: 检查你的中转服务器防火墙是否放行了 UDP，或者你购买的中转服务商屏蔽了 UDP。"
+                    fi
+                    rm -f /tmp/udp_test.py
+                else
+                    red "  [✘] 跳过探针测试：当前为 HTTP 代理模式，底层原生不具备处理 UDP 的能力。"
+                fi
+
+                echo ""
+                yellow "  [3/3] 正在提取 Hysteria 2 最新实时运行日志 (最后 30 行)..."
+                echo "  ──────────────────────────────────────────────────"
+                if [[ $SYSTEM == "Alpine" ]]; then
+                    cat /var/log/hysteria.log 2>/dev/null | tail -n 30 || echo "  未配置独立 Alpine 日志记录路径。"
+                else
+                    journalctl -u hysteria-server --no-pager -n 30
+                fi
+                echo "  ──────────────────────────────────────────────────"
+                purple "  【诊断指南】: "
+                purple "   1. 正常中转时，如果有设备连接，应能看到类似 'outbound' 和目标域名的记录。"
+                purple "   2. 如果满屏飘红出现 'outbound connection failed'、'timeout'，请立即更换中转节点！"
+            fi
             ;;
         0)
             return
@@ -1648,33 +1818,7 @@ config_outbound() {
     esac
 
     echo ""
-    yellow "  正在重启 Hysteria 2 服务以使配置生效..."
-    svc_stop hysteria-server 2>/dev/null
-    svc_start hysteria-server
-
-    sleep 2
-
-    # 验证重启是否成功，失败则自动回滚
-    local is_active=0
-    if [[ $SYSTEM == "Alpine" ]]; then
-        rc-service hysteria-server status 2>/dev/null | grep -q 'started' && is_active=1
-    else
-        systemctl is-active --quiet hysteria-server 2>/dev/null && is_active=1
-    fi
-
-    if [[ $is_active -eq 1 ]]; then
-        green "  [✔] 重启成功！新的出口规则已生效。"
-    else
-        red "  [✘] 致命错误：服务启动失败！"
-        yellow "  可能原因：代理格式填写错误，或代理地址无法连通。"
-        purple "  正在为您自动回滚到上一次的可用配置..."
-        mv -f /etc/hysteria/config.yaml.bak /etc/hysteria/config.yaml
-        svc_start hysteria-server
-        green "  [✔] 回滚完成，已恢复原状态。"
-    fi
-
-    echo ""
-    echo -en " ${LIGHT_YELLOW} ▶ 按回车键返回主菜单... ${PLAIN}"
+    echo -en " ${LIGHT_YELLOW} ▶ 按回车键返回... ${PLAIN}"
     read temp
 }
 
@@ -1701,12 +1845,12 @@ menu() {
     echo "----------------------------------------------------------------------------------"
     echo -e "  ${LIGHT_GREEN}[3]${PLAIN} ${LIGHT_YELLOW}启动 / 停止 / 重启服务${PLAIN}"
     echo -e "  ${LIGHT_GREEN}[4]${PLAIN} ${LIGHT_PURPLE}查看 / 修改 配置文件${PLAIN}"
-    echo -e "  ${LIGHT_GREEN}[9]${PLAIN} ${LIGHT_GREEN}配置 出口落地代理 (中转模式)${PLAIN}"
+    echo -e "  ${LIGHT_GREEN}[5]${PLAIN} ${LIGHT_GREEN}配置 出口落地代理 (中转模式 & 深度诊断)${PLAIN}"
     echo "----------------------------------------------------------------------------------"
-    echo -e "  ${LIGHT_GREEN}[5]${PLAIN} ${LIGHT_GREEN}获取 节点配置 与 订阅链接${PLAIN}"
-    echo -e "  ${LIGHT_GREEN}[6]${PLAIN} ${LIGHT_YELLOW}查看 客户端连接 与 流量统计${PLAIN}"
-    echo -e "  ${LIGHT_GREEN}[7]${PLAIN} ${LIGHT_PURPLE}开启 BBR 及 UDP 极限并发加速 (强烈推荐)${PLAIN}"
-    echo -e "  ${LIGHT_GREEN}[8]${PLAIN} ${LIGHT_GREEN}检查 证书安装状态与详细信息${PLAIN}"
+    echo -e "  ${LIGHT_GREEN}[6]${PLAIN} ${LIGHT_GREEN}获取 节点配置 与 订阅链接${PLAIN}"
+    echo -e "  ${LIGHT_GREEN}[7]${PLAIN} ${LIGHT_YELLOW}查看 客户端连接 与 流量统计${PLAIN}"
+    echo -e "  ${LIGHT_GREEN}[8]${PLAIN} ${LIGHT_PURPLE}开启 BBR 及 UDP 极限并发加速 (强烈推荐)${PLAIN}"
+    echo -e "  ${LIGHT_GREEN}[9]${PLAIN} ${LIGHT_GREEN}检查 证书安装状态与详细信息${PLAIN}"
     echo "----------------------------------------------------------------------------------"
     echo -e "  ${LIGHT_GREEN}[0]${PLAIN} ${LIGHT_RED}退出脚本${PLAIN}"
     red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
@@ -1718,11 +1862,11 @@ menu() {
         2 ) unsthysteria ;;
         3 ) hysteriaswitch ;;
         4 ) edit_config ;;
-        5 ) showconf ;;
-        6 ) check_traffic ;;
-        7 ) enable_bbr ;;
-        8 ) check_cert ;;
-        9 ) config_outbound ;;
+        5 ) config_outbound ;;
+        6 ) showconf ;;
+        7 ) check_traffic ;;
+        8 ) enable_bbr ;;
+        9 ) check_cert ;;
         0 ) exit 0 ;;
         * ) red "  输入无效"; sleep 1 ;;
     esac
