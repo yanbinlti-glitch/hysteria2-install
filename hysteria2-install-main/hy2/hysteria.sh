@@ -453,8 +453,13 @@ inst_sub_port(){
     read sub_port_input
     [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 10000-30000 -n 1)
     
-    while [[ ! "$sub_port_input" =~ ^[0-9]+$ ]] || [[ "$sub_port_input" -lt 1024 ]] || [[ "$sub_port_input" -gt 65535 ]]; do
-        red " [警告] 端口必须在 1024-65535 之间！"
+    # 修复：增加了防冲突检验，避免与跳跃端口范围冲突
+    while [[ ! "$sub_port_input" =~ ^[0-9]+$ ]] || [[ "$sub_port_input" -lt 1024 ]] || [[ "$sub_port_input" -gt 65535 ]] || { [[ -n "$firstport" && -n "$endport" ]] && [[ "$sub_port_input" -ge "$firstport" && "$sub_port_input" -le "$endport" ]]; }; do
+        if [[ -n "$firstport" && -n "$endport" && "$sub_port_input" -ge "$firstport" && "$sub_port_input" -le "$endport" ]]; then
+            red " [警告] 订阅端口不能与跳跃端口范围 ($firstport-$endport) 重叠冲突！"
+        else
+            red " [警告] 端口必须在 1024-65535 之间！"
+        fi
         echo -en " ${LIGHT_YELLOW} ▶ 重新设置订阅端口: ${PLAIN}"
         read sub_port_input
         [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 10000-30000 -n 1)
@@ -489,6 +494,17 @@ inst_other_configs() {
     echo -en " ${LIGHT_YELLOW} ▶ 节点显示名称 [回车默认 Hysteria2_Node]: ${PLAIN}"
     read custom_node_name
     [[ -z $custom_node_name ]] && custom_node_name="Hysteria2_Node"
+    
+    # 修复：增加防阻断下的证书跳过选项
+    echo ""
+    echo -en " ${LIGHT_YELLOW} ▶ 是否在客户端配置中强制开启 '跳过证书验证' (防 SNI 阻断/高墙推荐)？(y/n) [默认: y]: ${PLAIN}"
+    read force_skip_cert
+    [[ -z $force_skip_cert ]] && force_skip_cert="y"
+    if [[ "$force_skip_cert" == "y" || "$force_skip_cert" == "Y" ]]; then
+        echo "1" > /etc/hysteria/force_skip_cert.txt
+    else
+        echo "0" > /etc/hysteria/force_skip_cert.txt
+    fi
 
     echo ""
     print_line
@@ -591,6 +607,9 @@ clean_env() {
 
     svc_stop hysteria-server 2>/dev/null; svc_disable hysteria-server 2>/dev/null
     svc_stop hysteria-sub 2>/dev/null; svc_disable hysteria-sub 2>/dev/null
+    
+    # 修复：防止 Python 服务挂起遗留孤儿进程
+    pkill -f "server.py" 2>/dev/null || true
 
     if [[ $SYSTEM == "Alpine" ]]; then
         rm -f /etc/init.d/hysteria-server /etc/init.d/hysteria-sub
@@ -633,10 +652,11 @@ generate_client_configs() {
     
     local s_obfs_pwd=$(awk '/obfs:/{flag=1} flag && /password:/{print $2; flag=0}' /etc/hysteria/config.yaml | tr -d '"' | tr -d "'")
     local is_insecure_url=$(cat /etc/hysteria/insecure_state.txt || echo "1")
+    local force_skip=$(cat /etc/hysteria/force_skip_cert.txt 2>/dev/null || echo "1")
     
     local clash_cert_verify="false"
     
-    if [[ "$is_insecure_url" == "0" ]]; then
+    if [[ "$is_insecure_url" == "0" && "$force_skip" == "0" ]]; then
         clash_cert_verify="false"
         echo "$c_domain" > /etc/hysteria/sub_host.txt
     else
@@ -1265,6 +1285,8 @@ starthysteria() {
 stophysteria_only() {
     svc_stop hysteria-server
     svc_stop hysteria-sub
+    # 修复：确保 Python 进程被杀死
+    pkill -f "server.py" 2>/dev/null || true
     echo ""
     yellow "  Hysteria 2 及订阅服务已停止！"
 }
@@ -1315,7 +1337,8 @@ enable_bbr() {
     local page_size=$(getconf PAGESIZE 2>/dev/null)
     [[ -z "$page_size" || ! "$page_size" =~ ^[0-9]+$ ]] && page_size=4096
     
-    local mem_pages=$(( total_mem_kb * 1024 / page_size ))
+    # 修复：规避 32 位系统计算整型溢出导致负数的错误
+    local mem_pages=$(( total_mem_kb / (page_size / 1024) ))
     
     local udp_max=$(( mem_pages / 4 ))
     [[ $udp_max -lt 65536 ]] && udp_max=65536
@@ -1637,9 +1660,10 @@ config_outbound() {
 
             cp -f /etc/hysteria/config.yaml /etc/hysteria/config.yaml.bak
 
+            # 修复：更鲁棒的 YAML 块删除正则，防止吞掉后续配置
             awk '
             /^outbound:/ { in_outbound=1; next }
-            /^[a-zA-Z]/ { if(in_outbound) in_outbound=0 }
+            /^[^[:space:]#]/ && !/^outbound:/ { if(in_outbound) in_outbound=0 }
             { if(!in_outbound) print $0 }
             ' /etc/hysteria/config.yaml > /tmp/hy2_config_tmp.yaml
             
@@ -1690,11 +1714,14 @@ config_outbound() {
             ;;
         2)
             cp -f /etc/hysteria/config.yaml /etc/hysteria/config.yaml.bak
+            
+            # 修复：同样的 YAML 匹配优化
             awk '
             /^outbound:/ { in_outbound=1; next }
-            /^[a-zA-Z]/ { if(in_outbound) in_outbound=0 }
+            /^[^[:space:]#]/ && !/^outbound:/ { if(in_outbound) in_outbound=0 }
             { if(!in_outbound) print $0 }
             ' /etc/hysteria/config.yaml > /tmp/hy2_config_tmp.yaml
+            
             mv -f /tmp/hy2_config_tmp.yaml /etc/hysteria/config.yaml
             green "  已清除落地代理配置，准备恢复本机直连。"
             
@@ -1748,8 +1775,11 @@ config_outbound() {
                 echo ""
                 yellow "  [2/3] 正在深度检测 UDP 协议底层转发支持度..."
                 if [[ "$current_type" == "socks5" ]]; then
-                    # 生成临时 Python 探针，发送 UDP ASSOCIATE 请求
-                    cat << 'EOF' > /tmp/udp_test.py
+                    
+                    # 修复：使用 mktemp 替代硬编码 /tmp 路径，避免并发覆盖和符号链接攻击
+                    local udp_test_py=$(mktemp /tmp/udp_test_XXXXXX.py)
+                    
+                    cat << 'EOF' > "$udp_test_py"
 import socket, struct, sys
 try:
     proxy_ip = sys.argv[1]
@@ -1781,7 +1811,7 @@ EOF
                     local p_host=$(echo "$current_addr" | awk -F':' '{print $1}')
                     local p_port=$(echo "$current_addr" | awk -F':' '{print $2}')
                     
-                    local udp_res=$(python3 /tmp/udp_test.py "$p_host" "$p_port" "$current_user" "$current_pass" 2>/dev/null)
+                    local udp_res=$(python3 "$udp_test_py" "$p_host" "$p_port" "$current_user" "$current_pass" 2>/dev/null)
                     
                     if [[ "$udp_res" == *"SUCCESS"* ]]; then
                         green "  [✔] 探针检测完毕: 该 SOCKS5 节点完美支持 UDP 转发流量！"
@@ -1790,7 +1820,7 @@ EOF
                         red "  探针回传报错: ${udp_res#FAIL: }"
                         purple "  【排错建议】: 检查你的中转服务器防火墙是否放行了 UDP，或者你购买的中转服务商屏蔽了 UDP。"
                     fi
-                    rm -f /tmp/udp_test.py
+                    rm -f "$udp_test_py"
                 else
                     red "  [✘] 跳过探针测试：当前为 HTTP 代理模式，底层原生不具备处理 UDP 的能力。"
                 fi
