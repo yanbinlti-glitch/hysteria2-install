@@ -1292,9 +1292,6 @@ hysteriaswitch() {
     esac
 }
 
-# ===============================
-# 内核参数极限调优模块更新
-# ===============================
 enable_bbr() {
     echo ""
     print_line
@@ -1552,6 +1549,135 @@ check_cert() {
     read temp
 }
 
+config_outbound() {
+    clear
+    echo ""
+    print_line
+    green "                 Hysteria 2 落地代理 (中转) 设置               "
+    print_line
+    echo ""
+
+    if [[ ! -f /etc/hysteria/config.yaml ]]; then
+        red "  未检测到 Hysteria 2 配置文件，请先安装！"
+        sleep 2; return
+    fi
+
+    # 检查当前是否开启了 outbound
+    if grep -q "^outbound:" /etc/hysteria/config.yaml; then
+        local current_type=$(awk '/^outbound:/{getline; print $2}' /etc/hysteria/config.yaml | tr -d '\r')
+        yellow "  当前状态: [已开启] 落地代理模式 (类型: $current_type)"
+    else
+        green "  当前状态: [未开启] 本机直连输出"
+    fi
+    echo ""
+    
+    echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}配置 / 修改 落地代理 (支持 SOCKS5 / HTTP)${PLAIN}"
+    echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_RED}关闭 落地代理 (恢复本机 IP 直连输出)${PLAIN}"
+    echo ""
+    echo -e "    ${LIGHT_GREEN}[0]${PLAIN} ${LIGHT_PURPLE}返回主菜单${PLAIN}"
+    echo ""
+    echo -en " ${LIGHT_YELLOW} ▶ 请输入选项 [0-2]: ${PLAIN}"
+    read out_choice
+
+    case $out_choice in
+        1)
+            echo ""
+            echo -en " ${LIGHT_YELLOW} ▶ 请选择代理类型 [1. SOCKS5 | 2. HTTP] (默认1): ${PLAIN}"
+            read out_type
+            [[ -z "$out_type" ]] && out_type=1
+
+            echo -en " ${LIGHT_YELLOW} ▶ 请输入代理地址 (格式: IP:端口 或 域名:端口): ${PLAIN}"
+            read out_addr
+            [[ -z "$out_addr" ]] && { red " 地址不能为空！"; sleep 2; return; }
+
+            echo -en " ${LIGHT_YELLOW} ▶ 请输入代理用户名 (如果没有请直接回车): ${PLAIN}"
+            read out_user
+            out_user=$(echo "$out_user" | tr -d '\r' | tr -d ' ')
+
+            echo -en " ${LIGHT_YELLOW} ▶ 请输入代理密码 (如果没有请直接回车): ${PLAIN}"
+            read out_pass
+            out_pass=$(echo "$out_pass" | tr -d '\r' | tr -d ' ')
+
+            # 备份原配置
+            cp -f /etc/hysteria/config.yaml /etc/hysteria/config.yaml.bak
+
+            # 安全清除旧的 outbound 配置块
+            awk '
+            /^outbound:/ { in_outbound=1; next }
+            /^[a-zA-Z]/ { if(in_outbound) in_outbound=0 }
+            { if(!in_outbound) print $0 }
+            ' /etc/hysteria/config.yaml > /tmp/hy2_config_tmp.yaml
+            
+            # 生成新的 outbound 配置块
+            local out_block="outbound:\n"
+            if [[ "$out_type" == "1" ]]; then
+                out_block+="  type: socks5\n  socks5:\n    addr: $out_addr\n"
+                [[ -n "$out_user" ]] && out_block+="    username: $out_user\n    password: $out_pass\n"
+            else
+                local auth_part=""
+                [[ -n "$out_user" ]] && auth_part="${out_user}:${out_pass}@"
+                out_block+="  type: http\n  http:\n    url: http://${auth_part}${out_addr}\n"
+            fi
+
+            # 插入到 trafficStats 之前，如果没有则追加到末尾
+            if grep -q "^trafficStats:" /tmp/hy2_config_tmp.yaml; then
+                sed -i '/^trafficStats:/i \'"$out_block"'' /tmp/hy2_config_tmp.yaml
+            else
+                echo -e "$out_block" >> /tmp/hy2_config_tmp.yaml
+            fi
+
+            mv -f /tmp/hy2_config_tmp.yaml /etc/hysteria/config.yaml
+            green "  已生成新的落地代理配置！"
+            ;;
+        2)
+            cp -f /etc/hysteria/config.yaml /etc/hysteria/config.yaml.bak
+            awk '
+            /^outbound:/ { in_outbound=1; next }
+            /^[a-zA-Z]/ { if(in_outbound) in_outbound=0 }
+            { if(!in_outbound) print $0 }
+            ' /etc/hysteria/config.yaml > /tmp/hy2_config_tmp.yaml
+            mv -f /tmp/hy2_config_tmp.yaml /etc/hysteria/config.yaml
+            green "  已清除落地代理配置，准备恢复本机直连。"
+            ;;
+        0)
+            return
+            ;;
+        *)
+            red "  输入无效"; sleep 1; return
+            ;;
+    esac
+
+    echo ""
+    yellow "  正在重启 Hysteria 2 服务以使配置生效..."
+    svc_stop hysteria-server 2>/dev/null
+    svc_start hysteria-server
+
+    sleep 2
+
+    # 验证重启是否成功，失败则自动回滚
+    local is_active=0
+    if [[ $SYSTEM == "Alpine" ]]; then
+        rc-service hysteria-server status 2>/dev/null | grep -q 'started' && is_active=1
+    else
+        systemctl is-active --quiet hysteria-server 2>/dev/null && is_active=1
+    fi
+
+    if [[ $is_active -eq 1 ]]; then
+        green "  [✔] 重启成功！新的出口规则已生效。"
+    else
+        red "  [✘] 致命错误：服务启动失败！"
+        yellow "  可能原因：代理格式填写错误，或代理地址无法连通。"
+        purple "  正在为您自动回滚到上一次的可用配置..."
+        mv -f /etc/hysteria/config.yaml.bak /etc/hysteria/config.yaml
+        svc_start hysteria-server
+        green "  [✔] 回滚完成，已恢复原状态。"
+    fi
+
+    echo ""
+    echo -en " ${LIGHT_YELLOW} ▶ 按回车键返回主菜单... ${PLAIN}"
+    read temp
+}
+
 # =================================================================
 #  8. 主菜单控制
 # =================================================================
@@ -1575,6 +1701,7 @@ menu() {
     echo "----------------------------------------------------------------------------------"
     echo -e "  ${LIGHT_GREEN}[3]${PLAIN} ${LIGHT_YELLOW}启动 / 停止 / 重启服务${PLAIN}"
     echo -e "  ${LIGHT_GREEN}[4]${PLAIN} ${LIGHT_PURPLE}查看 / 修改 配置文件${PLAIN}"
+    echo -e "  ${LIGHT_GREEN}[9]${PLAIN} ${LIGHT_GREEN}配置 出口落地代理 (中转模式)${PLAIN}"
     echo "----------------------------------------------------------------------------------"
     echo -e "  ${LIGHT_GREEN}[5]${PLAIN} ${LIGHT_GREEN}获取 节点配置 与 订阅链接${PLAIN}"
     echo -e "  ${LIGHT_GREEN}[6]${PLAIN} ${LIGHT_YELLOW}查看 客户端连接 与 流量统计${PLAIN}"
@@ -1584,7 +1711,7 @@ menu() {
     echo -e "  ${LIGHT_GREEN}[0]${PLAIN} ${LIGHT_RED}退出脚本${PLAIN}"
     red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
     echo ""
-    echo -en " ${LIGHT_YELLOW} ▶ 请输入选项 [0-8]: ${PLAIN}"
+    echo -en " ${LIGHT_YELLOW} ▶ 请输入选项 [0-9]: ${PLAIN}"
     read menuInput
     case $menuInput in
         1 ) insthysteria ;;
@@ -1595,6 +1722,7 @@ menu() {
         6 ) check_traffic ;;
         7 ) enable_bbr ;;
         8 ) check_cert ;;
+        9 ) config_outbound ;;
         0 ) exit 0 ;;
         * ) red "  输入无效"; sleep 1 ;;
     esac
