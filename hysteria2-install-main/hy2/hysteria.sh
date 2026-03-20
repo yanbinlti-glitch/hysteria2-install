@@ -1577,7 +1577,7 @@ config_outbound() {
     clear
     echo ""
     print_line
-    green "                 Hysteria 2 落地代理 (中转) 设置               "
+    green "                 Hysteria 2 落地代理 (静态住宅 IP 中转) 设置               "
     print_line
     echo ""
 
@@ -1591,22 +1591,22 @@ config_outbound() {
         local current_type=$(awk '/^outbound:/{getline; print $2}' /etc/hysteria/config.yaml | tr -d '\r')
         yellow "  当前状态: [已开启] 落地代理模式 (类型: $current_type)"
         
-        # 提取当前代理地址
+        # 提取当前代理地址用于展示
         local current_addr=""
         if [[ "$current_type" == "socks5" ]]; then
-            current_addr=$(awk '/socks5:/{getline; print $2}' /etc/hysteria/config.yaml | tr -d '\r')
+            current_addr=$(awk '/socks5:/{getline; print $2}' /etc/hysteria/config.yaml | awk '/addr:/{print $2}' | tr -d '\r')
         elif [[ "$current_type" == "http" ]]; then
-            current_addr=$(awk '/http:/{getline; print $2}' /etc/hysteria/config.yaml | tr -d '\r')
+            current_addr=$(awk '/http:/{getline; print $2}' /etc/hysteria/config.yaml | awk '/url:/{print $2}' | tr -d '\r')
         fi
         [[ -n "$current_addr" ]] && green "  当前代理地址: $current_addr"
     else
-        green "  当前状态: [未开启] 本机直连输出"
+        green "  当前状态: [未开启] 本机 IP 直连输出"
     fi
     echo ""
     
-    echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}配置 / 修改 落地代理 (支持 SOCKS5 / HTTP)${PLAIN}"
-    echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_RED}关闭 落地代理 (恢复本机 IP 直连输出)${PLAIN}"
-    echo -e "    ${LIGHT_GREEN}[3]${PLAIN} ${LIGHT_YELLOW}诊断 落地代理健康状态与 UDP 支持测试${PLAIN}"
+    echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}配置 / 修改 落地代理 (支持一键粘贴完整 URI 格式)${PLAIN}"
+    echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_RED}退回 服务器直连 (关闭当前落地代理)${PLAIN}"
+    echo -e "    ${LIGHT_GREEN}[3]${PLAIN} ${LIGHT_YELLOW}检查 落地状态 (验证静态住宅 IP 与核心状态)${PLAIN}"
     echo ""
     echo -e "    ${LIGHT_GREEN}[0]${PLAIN} ${LIGHT_PURPLE}返回主菜单${PLAIN}"
     echo ""
@@ -1616,67 +1616,71 @@ config_outbound() {
     case $out_choice in
         1)
             echo ""
-            echo -en " ${LIGHT_YELLOW} ▶ 请选择代理类型 [1. SOCKS5 | 2. HTTP] (默认1): ${PLAIN}"
-            read out_type
-            [[ -z "$out_type" ]] && out_type=1
+            yellow "  ▶ 请输入完整的代理 URI"
+            yellow "  (支持格式: socks5://user:pass@ip:port 或 http://user:pass@ip:port)"
+            echo -en " ${LIGHT_YELLOW} ▶ 代理 URI: ${PLAIN}"
+            read proxy_uri
+            [[ -z "$proxy_uri" ]] && { red " 地址不能为空！"; sleep 2; return; }
 
-            echo -en " ${LIGHT_YELLOW} ▶ 请输入代理地址 (格式: IP:端口 或 域名:端口): ${PLAIN}"
-            read out_addr
-            [[ -z "$out_addr" ]] && { red " 地址不能为空！"; sleep 2; return; }
+            proxy_uri=$(echo "$proxy_uri" | tr -d '\r' | tr -d ' ')
 
-            echo -en " ${LIGHT_YELLOW} ▶ 请输入代理用户名 (如果没有请直接回车): ${PLAIN}"
-            read out_user
-            out_user=$(echo "$out_user" | tr -d '\r' | tr -d ' ')
+            # 正则解析 URI 字符串
+            local out_type=""
+            local out_user=""
+            local out_pass=""
+            local out_addr=""
 
-            echo -en " ${LIGHT_YELLOW} ▶ 请输入代理密码 (如果没有请直接回车): ${PLAIN}"
-            read out_pass
-            out_pass=$(echo "$out_pass" | tr -d '\r' | tr -d ' ')
-
-            yellow "  正在测试代理连通性 (连接外网中)..."
-            local curl_proxy=""
-            if [[ "$out_type" == "1" ]]; then
-                if [[ -n "$out_user" ]]; then
-                    curl_proxy="socks5h://${out_user}:${out_pass}@${out_addr}"
+            if [[ "$proxy_uri" =~ ^(socks5|http):// ]]; then
+                out_type="${BASH_REMATCH[1]}"
+                local remain="${proxy_uri#*://}"
+                if [[ "$remain" == *"@"* ]]; then
+                    local userpass="${remain%@*}"
+                    out_addr="${remain#*@}"
+                    out_user="${userpass%:*}"
+                    out_pass="${userpass#*:}"
                 else
-                    curl_proxy="socks5h://${out_addr}"
+                    out_addr="$remain"
                 fi
             else
-                if [[ -n "$out_user" ]]; then
-                    curl_proxy="http://${out_user}:${out_pass}@${out_addr}"
-                else
-                    curl_proxy="http://${out_addr}"
-                fi
+                red "  [错误] 格式不正确！必须以 socks5:// 或 http:// 开头。"
+                sleep 2; return
             fi
 
-            local test_res=$(curl -x "$curl_proxy" -s -m 5 https://www.cloudflare.com/cdn-cgi/trace | grep "ip=")
-            if [[ -n "$test_res" ]]; then
-                green "  [✔] 代理测试成功！验证到出口 IP: ${test_res#ip=}"
+            echo ""
+            yellow "  正在测试静态住宅 IP 代理的连通性..."
+            
+            # 兼容 curl 的原生代理测试格式
+            local curl_proxy="$proxy_uri"
+            local test_res=$(curl -x "$curl_proxy" -s -m 7 https://api.ipify.org)
+            
+            if [[ -n "$test_res" && ("$test_res" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ || "$test_res" =~ :) ]]; then
+                green "  [✔] 代理连通测试成功！获取到静态住宅出口 IP: ${test_res}"
             else
-                red "  [✘] 代理测试失败！无法通过该代理连接外网 (请求超时或被拒绝)。"
-                echo -en " ${LIGHT_YELLOW} ▶ 代理可能无效或目标节点被封禁，是否强制保存并继续？(y/n) [默认: n]: ${PLAIN}"
+                red "  [✘] 代理测试失败！无法通过该代理连接外网 (请求超时或验证被拒绝)。"
+                echo -en " ${LIGHT_YELLOW} ▶ 代理可能无效，是否强制保存并继续？(y/n) [默认: n]: ${PLAIN}"
                 read force_save
                 [[ "$force_save" != "y" && "$force_save" != "Y" ]] && { yellow "  已取消中转配置。"; sleep 2; return; }
             fi
 
             cp -f /etc/hysteria/config.yaml /etc/hysteria/config.yaml.bak
 
-            # 修复：更鲁棒的 YAML 块删除正则，防止吞掉后续配置
+            # 精准删除旧的 outbound 块
             awk '
             /^outbound:/ { in_outbound=1; next }
             /^[^[:space:]#]/ && !/^outbound:/ { if(in_outbound) in_outbound=0 }
             { if(!in_outbound) print $0 }
             ' /etc/hysteria/config.yaml > /tmp/hy2_config_tmp.yaml
             
+            # 构建新的 outbound 块
             local out_block="outbound:\n"
-            if [[ "$out_type" == "1" ]]; then
+            if [[ "$out_type" == "socks5" ]]; then
                 out_block+="  type: socks5\n  socks5:\n    addr: $out_addr\n"
                 [[ -n "$out_user" ]] && out_block+="    username: $out_user\n    password: $out_pass\n"
             else
-                local auth_part=""
-                [[ -n "$out_user" ]] && auth_part="${out_user}:${out_pass}@"
-                out_block+="  type: http\n  http:\n    url: http://${auth_part}${out_addr}\n"
+                out_block+="  type: http\n  http:\n    url: $proxy_uri\n"
             fi
 
+            # 安全插入配置末尾
             if grep -q "^trafficStats:" /tmp/hy2_config_tmp.yaml; then
                 awk -v block="$(echo -e "$out_block")" '/^trafficStats:/ {print block} {print}' /tmp/hy2_config_tmp.yaml > /tmp/hy2_config_tmp2.yaml
                 mv -f /tmp/hy2_config_tmp2.yaml /tmp/hy2_config_tmp.yaml
@@ -1685,11 +1689,11 @@ config_outbound() {
             fi
 
             mv -f /tmp/hy2_config_tmp.yaml /etc/hysteria/config.yaml
-            green "  已生成并应用新的落地代理配置！"
+            green "  新落地代理配置写入完毕！"
             
-            # 重启服务逻辑
+            # 强制重启核心使其生效
             echo ""
-            yellow "  正在重启 Hysteria 2 服务以使配置生效..."
+            yellow "  正在重启 Hysteria 2 核心应用配置..."
             svc_stop hysteria-server 2>/dev/null
             svc_start hysteria-server
 
@@ -1703,19 +1707,18 @@ config_outbound() {
             fi
 
             if [[ $is_active -eq 1 ]]; then
-                green "  [✔] 重启成功！新的出口规则已生效。"
+                green "  [✔] 重启成功！静态住宅 IP 落地规则已全面生效。"
             else
-                red "  [✘] 致命错误：服务启动失败！"
-                purple "  正在为您自动回滚到上一次的可用配置..."
+                red "  [✘] 致命错误：核心服务启动失败！可能配置文件语法存在冲突。"
+                purple "  正在为您自动回滚到修改前的稳定配置..."
                 mv -f /etc/hysteria/config.yaml.bak /etc/hysteria/config.yaml
                 svc_start hysteria-server
-                green "  [✔] 回滚完成，已恢复原状态。"
+                green "  [✔] 回滚完成，已恢复原状。"
             fi
             ;;
         2)
             cp -f /etc/hysteria/config.yaml /etc/hysteria/config.yaml.bak
             
-            # 修复：同样的 YAML 匹配优化
             awk '
             /^outbound:/ { in_outbound=1; next }
             /^[^[:space:]#]/ && !/^outbound:/ { if(in_outbound) in_outbound=0 }
@@ -1723,120 +1726,61 @@ config_outbound() {
             ' /etc/hysteria/config.yaml > /tmp/hy2_config_tmp.yaml
             
             mv -f /tmp/hy2_config_tmp.yaml /etc/hysteria/config.yaml
-            green "  已清除落地代理配置，准备恢复本机直连。"
+            green "  已清除落地代理配置参数。"
             
+            yellow "  正在重启 Hysteria 2 核心..."
             svc_stop hysteria-server 2>/dev/null
             svc_start hysteria-server
+            sleep 2
+            green "  [✔] 重启成功！已安全退回服务器本机 IP 直连输出模式。"
             ;;
         3)
             echo ""
             print_line
-            yellow "  ▶ 正在诊断中转代理健康状态与实时日志..."
+            yellow "  ▶ 正在检查落地代理运行与健康状态..."
             if ! grep -q "^outbound:" /etc/hysteria/config.yaml; then
-                red "  当前未开启落地代理，无法诊断。"
+                red "  当前未开启落地代理，正在使用本机原生直连。"
             else
                 local current_type=$(awk '/^outbound:/{getline; print $2}' /etc/hysteria/config.yaml | tr -d '\r')
-                local current_addr=""
-                local current_user=""
-                local current_pass=""
-                
-                if [[ "$current_type" == "socks5" ]]; then
-                    current_addr=$(awk '/socks5:/{getline; print $2}' /etc/hysteria/config.yaml | awk '/addr:/{print $2}' | tr -d '\r')
-                    current_user=$(awk '/socks5:/{getline; getline; print $0}' /etc/hysteria/config.yaml | awk '/username:/{print $2}' | tr -d '\r')
-                    current_pass=$(awk '/socks5:/{getline; getline; getline; print $0}' /etc/hysteria/config.yaml | awk '/password:/{print $2}' | tr -d '\r')
-                elif [[ "$current_type" == "http" ]]; then
-                    local http_url=$(awk '/http:/{getline; print $2}' /etc/hysteria/config.yaml | awk '/url:/{print $2}' | tr -d '\r')
-                    current_addr=$(echo "$http_url" | awk -F'//' '{print $2}')
-                    if [[ "$current_addr" == *"@"* ]]; then
-                        current_user=$(echo "$current_addr" | awk -F':' '{print $1}')
-                        current_pass=$(echo "$current_addr" | awk -F':' '{print $2}' | awk -F'@' '{print $1}')
-                        current_addr=$(echo "$current_addr" | awk -F'@' '{print $2}')
-                    fi
-                fi
-
                 local curl_proxy=""
+                
+                # 提取供 curl 测试使用的格式
                 if [[ "$current_type" == "socks5" ]]; then
-                    [[ -n "$current_user" ]] && curl_proxy="socks5h://${current_user}:${current_pass}@${current_addr}" || curl_proxy="socks5h://${current_addr}"
-                    green "  代理类型: SOCKS5 (理论上支持 TCP & UDP 中转)"
-                else
-                    [[ -n "$current_user" ]] && curl_proxy="http://${current_user}:${current_pass}@${current_addr}" || curl_proxy="http://${current_addr}"
-                    yellow "  代理类型: HTTP (警告: 标准 HTTP 代理原生不支持 UDP 转发，可能导致 UDP 流量断流或异常)"
-                fi
-
-                echo ""
-                yellow "  [1/3] 正在测试外网 TCP 连通性..."
-                local test_ip=$(curl -x "$curl_proxy" -s -m 5 https://api.ipify.org)
-                if [[ -n "$test_ip" ]]; then
-                    green "  [✔] TCP 连通性测试通过！当前中转出口真实 IP: $test_ip"
-                else
-                    red "  [✘] TCP 连通性测试失败！中转服务器无响应、被墙或验证失败。"
-                fi
-
-                echo ""
-                yellow "  [2/3] 正在深度检测 UDP 协议底层转发支持度..."
-                if [[ "$current_type" == "socks5" ]]; then
-                    
-                    # 修复：使用 mktemp 替代硬编码 /tmp 路径，避免并发覆盖和符号链接攻击
-                    local udp_test_py=$(mktemp /tmp/udp_test_XXXXXX.py)
-                    
-                    cat << 'EOF' > "$udp_test_py"
-import socket, struct, sys
-try:
-    proxy_ip = sys.argv[1]
-    proxy_port = int(sys.argv[2])
-    user = sys.argv[3] if len(sys.argv)>3 else ""
-    pwd = sys.argv[4] if len(sys.argv)>4 else ""
-
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(5)
-    s.connect((proxy_ip, proxy_port))
-
-    if user:
-        s.sendall(b"\x05\x01\x02")
-        if s.recv(2) != b"\x05\x02": raise Exception("SOCKS5 代理拒绝了账号密码验证模式")
-        req = b"\x01" + bytes([len(user)]) + user.encode() + bytes([len(pwd)]) + pwd.encode()
-        s.sendall(req)
-        if s.recv(2)[1] != 0: raise Exception("账号或密码错误")
-    else:
-        s.sendall(b"\x05\x01\x00")
-        if s.recv(2) != b"\x05\x00": raise Exception("此代理需要密码，但未配置")
-
-    s.sendall(b"\x05\x03\x00\x01\x00\x00\x00\x00\x00\x00")
-    res = s.recv(10)
-    if res[1] != 0: raise Exception("代理服务器主动拒绝了 UDP 转发请求 (该节点不支持 UDP)")
-    print("SUCCESS")
-except Exception as e:
-    print("FAIL: " + str(e))
-EOF
-                    local p_host=$(echo "$current_addr" | awk -F':' '{print $1}')
-                    local p_port=$(echo "$current_addr" | awk -F':' '{print $2}')
-                    
-                    local udp_res=$(python3 "$udp_test_py" "$p_host" "$p_port" "$current_user" "$current_pass" 2>/dev/null)
-                    
-                    if [[ "$udp_res" == *"SUCCESS"* ]]; then
-                        green "  [✔] 探针检测完毕: 该 SOCKS5 节点完美支持 UDP 转发流量！"
+                    local s_addr=$(awk '/socks5:/{getline; print $2}' /etc/hysteria/config.yaml | awk '/addr:/{print $2}' | tr -d '\r')
+                    local s_user=$(awk '/socks5:/{getline; getline; print $0}' /etc/hysteria/config.yaml | awk '/username:/{print $2}' | tr -d '\r')
+                    local s_pass=$(awk '/socks5:/{getline; getline; getline; print $0}' /etc/hysteria/config.yaml | awk '/password:/{print $2}' | tr -d '\r')
+                    if [[ -n "$s_user" ]]; then
+                        curl_proxy="socks5h://${s_user}:${s_pass}@${s_addr}"
                     else
-                        red "  [✘] UDP 转发被阻断或未开启！"
-                        red "  探针回传报错: ${udp_res#FAIL: }"
-                        purple "  【排错建议】: 检查你的中转服务器防火墙是否放行了 UDP，或者你购买的中转服务商屏蔽了 UDP。"
+                        curl_proxy="socks5h://${s_addr}"
                     fi
-                    rm -f "$udp_test_py"
-                else
-                    red "  [✘] 跳过探针测试：当前为 HTTP 代理模式，底层原生不具备处理 UDP 的能力。"
+                elif [[ "$current_type" == "http" ]]; then
+                    curl_proxy=$(awk '/http:/{getline; print $2}' /etc/hysteria/config.yaml | awk '/url:/{print $2}' | tr -d '\r')
                 fi
 
                 echo ""
-                yellow "  [3/3] 正在提取 Hysteria 2 最新实时运行日志 (最后 30 行)..."
-                echo "  ──────────────────────────────────────────────────"
-                if [[ $SYSTEM == "Alpine" ]]; then
-                    cat /var/log/hysteria.log 2>/dev/null | tail -n 30 || echo "  未配置独立 Alpine 日志记录路径。"
+                yellow "  [1/2] 测试外网 TCP 连通性与真实出口 IP 伪装度..."
+                local test_ip=$(curl -x "$curl_proxy" -s -m 5 https://api.ipify.org)
+                if [[ -n "$test_ip" && ("$test_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ || "$test_ip" =~ :) ]]; then
+                    green "  [✔] 落地状态正常！您的最终出口 IP 现为: $test_ip"
                 else
-                    journalctl -u hysteria-server --no-pager -n 30
+                    red "  [✘] 测试失败！您的静态住宅代理可能已过期、被封禁或格式错误导致无法连通网络。"
                 fi
-                echo "  ──────────────────────────────────────────────────"
-                purple "  【诊断指南】: "
-                purple "   1. 正常中转时，如果有设备连接，应能看到类似 'outbound' 和目标域名的记录。"
-                purple "   2. 如果满屏飘红出现 'outbound connection failed'、'timeout'，请立即更换中转节点！"
+
+                echo ""
+                yellow "  [2/2] 检查 Hysteria 2 守护进程运转情况..."
+                local is_active=0
+                if [[ $SYSTEM == "Alpine" ]]; then
+                    rc-service hysteria-server status 2>/dev/null | grep -q 'started' && is_active=1
+                else
+                    systemctl is-active --quiet hysteria-server 2>/dev/null && is_active=1
+                fi
+                
+                if [[ $is_active -eq 1 ]]; then
+                    green "  [✔] 核心进程状态: 活跃 (Active & Running)"
+                else
+                    red "  [✘] 核心进程状态: 停止/崩溃 (Inactive)"
+                fi
             fi
             ;;
         0)
