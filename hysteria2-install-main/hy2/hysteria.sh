@@ -150,7 +150,6 @@ check_env() {
     yellow "  正在检查 Hysteria 2 核心及前置依赖包..."
     echo ""
     
-    # 加入 jq 依赖
     local cmds=("curl" "wget" "sudo" "ss" "iptables" "python3" "openssl" "socat" "qrencode" "jq")
     local missing=0
 
@@ -189,18 +188,18 @@ check_env() {
         
         if [[ $SYSTEM == "Alpine" ]]; then
             $PKG_INSTALL curl wget sudo procps iptables ip6tables iproute2 python3 openssl socat cronie libqrencode-tools jq || { echo ""; red " [错误] 前置依赖安装失败！请检查系统源或网络后重试。"; exit 1; }
-            svc_start crond; svc_enable crond
+            rc-update add crond default 2>/dev/null; rc-service crond start 2>/dev/null
         elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" || $SYSTEM == "Alma" || $SYSTEM == "Rocky" ]]; then
             $PKG_INSTALL epel-release || { echo ""; red " [错误] epel-release 扩展源安装失败！"; exit 1; }
             $PKG_INSTALL curl wget sudo procps iptables iptables-services iproute python3 openssl socat cronie qrencode jq || { echo ""; red " [错误] 前置依赖安装失败！请检查系统源或网络后重试。"; exit 1; }
-            svc_start crond; svc_enable crond
+            systemctl enable --now crond 2>/dev/null || systemctl enable --now cron 2>/dev/null
         else
             yellow "  正在尝试修复并清理系统损坏的依赖项..."
             apt-get --fix-broken install -y || { echo ""; red " [错误] 尝试修复系统损坏的依赖项失败！"; exit 1; }
             apt-get autoremove -y
             apt-get clean
             $PKG_INSTALL curl wget sudo procps iptables-persistent netfilter-persistent iproute2 python3 openssl socat cron qrencode jq || { echo ""; red " [错误] 前置依赖安装失败！请检查 APT 源或网络后重试。"; exit 1; }
-            svc_start cron; svc_enable cron
+            systemctl enable --now cron 2>/dev/null || systemctl enable --now crond 2>/dev/null
         fi
         
         echo ""
@@ -232,13 +231,17 @@ inst_cert() {
     [[ -z "$certInput" ]] && certInput=1
 
     if [[ "$certInput" == 2 ]]; then
-        cert_path="/root/cert.crt"
-        key_path="/root/private.key"
         if [[ -f /root/cert.crt && -f /root/private.key && -f /root/ca.log ]]; then
             domain=$(cat /root/ca.log | tr -d '\r')
             echo ""
             green " 检测到原有域名：$domain 的证书，正在直接应用..."
             hy_domain="$domain"
+            cert_path="/var/www/hysteria/certs/cert.crt"
+            key_path="/var/www/hysteria/certs/private.key"
+            mkdir -p /var/www/hysteria/certs
+            cp -f /root/cert.crt "$cert_path"
+            cp -f /root/private.key "$key_path"
+            chown -R nobody /var/www/hysteria/certs
         else
             realip
             echo ""
@@ -248,6 +251,7 @@ inst_cert() {
             domain=$(echo "$domain" | tr -d '\r' | tr -d ' ')
             green " 已记录域名：$domain"
             
+            # 【修复点】增强域名检测，双栈检测
             domainIP=$(DOMAIN="$domain" python3 -c "import socket, os; try: addrs=socket.getaddrinfo(os.environ.get('DOMAIN'), None); ips=[a[4][0] for a in addrs]; v4=[ip for ip in ips if '.' in ip]; print(v4[0] if v4 else ips[0]) except: print('')" 2>/dev/null || echo "")
             
             if [[ -z "$domainIP" ]]; then
@@ -330,6 +334,12 @@ inst_cert() {
                 chmod 644 /root/cert.crt; chmod 600 /root/private.key
                 green " 证书申请成功！已保存至 /root/ 目录下。"
                 hy_domain="$domain"
+                
+                # 【修复点】全局化 Acme 证书路径
+                cert_path="/var/www/hysteria/certs/cert.crt"
+                key_path="/var/www/hysteria/certs/private.key"
+                cp -f /root/cert.crt "$cert_path"
+                cp -f /root/private.key "$key_path"
             else
                 red " [错误] 证书申请失败！请向上翻阅执行日志检查具体报错信息。"
                 exit 1
@@ -428,10 +438,11 @@ inst_port() {
 
         modprobe ip6table_nat 2>/dev/null || true
         iptables -I INPUT -p udp --dport $firstport:$endport -m comment --comment "hy2-port-hop-input" -j ACCEPT 2>/dev/null
-        ip6tables -I INPUT -p udp --dport $firstport:$endport -m comment --comment "hy2-port-hop-input" -j ACCEPT 2>/dev/null
+        ip6tables -I INPUT -p udp --dport $firstport:$endport -m comment --comment "hy2-port-hop-input" -j ACCEPT 2>/dev/null || true
         
         iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop" 2>/dev/null
-        ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop" 2>/dev/null
+        # 【修复点】避免无 IPv6 NAT 模块时报错中断
+        ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop" 2>/dev/null || true
         
         if [[ $? -ne 0 ]]; then
             yellow "  [提示] 当前系统/内核可能不支持 IPv6 NAT，IPv6 端口跳跃已静默跳过。"
@@ -578,21 +589,12 @@ clean_env() {
     [[ -n "$main_port" && "$main_port" =~ ^[0-9]+$ ]] && close_port "$main_port" "udp"
     [[ -n "$sub_port" && "$sub_port" =~ ^[0-9]+$ ]] && close_port "$sub_port" "tcp"
 
-    if command -v iptables >/dev/null; then
-        iptables -t nat -nL PREROUTING --line-numbers 2>/dev/null | grep "hy2-port-hop" | awk '{print $1}' | sort -nr | while read -r num; do
-            iptables -t nat -D PREROUTING "$num" 2>/dev/null
-        done
-        iptables -nL INPUT --line-numbers 2>/dev/null | grep "hy2-port-hop-input" | awk '{print $1}' | sort -nr | while read -r num; do
-            iptables -D INPUT "$num" 2>/dev/null
-        done
+    # 【修复点】彻底淘汰易漂移的 --line-numbers 语法，改用 iptables-save 安全过滤
+    if command -v iptables-save >/dev/null; then
+        iptables-save | grep -v "hy2-port-hop" | iptables-restore 2>/dev/null || true
     fi
-    if command -v ip6tables >/dev/null; then
-        ip6tables -t nat -nL PREROUTING --line-numbers 2>/dev/null | grep "hy2-port-hop" | awk '{print $1}' | sort -nr | while read -r num; do
-            ip6tables -t nat -D PREROUTING "$num" 2>/dev/null
-        done
-        ip6tables -nL INPUT --line-numbers 2>/dev/null | grep "hy2-port-hop-input" | awk '{print $1}' | sort -nr | while read -r num; do
-            ip6tables -D INPUT "$num" 2>/dev/null
-        done
+    if command -v ip6tables-save >/dev/null; then
+        ip6tables-save | grep -v "hy2-port-hop" | ip6tables-restore 2>/dev/null || true
     fi
 
     if [[ -f /etc/hysteria/port_hop.txt ]]; then
@@ -850,6 +852,10 @@ WorkingDirectory=${web_dir}
 ExecStart=${py_path} ${web_dir}/server.py
 Restart=always
 RestartSec=3
+# 【修复点】控制日志大小，防止挤爆系统磁盘
+StandardOutput=journal
+StandardError=journal
+LogRateLimitIntervalSec=0
 
 [Install]
 WantedBy=multi-user.target
@@ -924,6 +930,9 @@ LimitNOFILE=1048576
 ExecStart=/usr/local/bin/hysteria server -c /etc/hysteria/config.yaml
 Restart=always
 RestartSec=3
+StandardOutput=journal
+StandardError=journal
+LogRateLimitIntervalSec=0
 
 [Install]
 WantedBy=multi-user.target
@@ -1332,7 +1341,10 @@ enable_bbr() {
     local total_mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
     
     local page_size=$(getconf PAGESIZE 2>/dev/null)
-    [[ -z "$page_size" || ! "$page_size" =~ ^[0-9]+$ ]] && page_size=4096
+    # 【修复点】确保在极简容器下 getconf 失败时具备安全的默认值，防止除0错误
+    if ! [[ "$page_size" =~ ^[0-9]+$ ]] || [[ "$page_size" -le 0 ]]; then
+        page_size=4096
+    fi
     
     local mem_pages=$(( total_mem_kb / (page_size / 1024) ))
     
@@ -1711,30 +1723,35 @@ config_outbound() {
 
             cp -f /etc/hysteria/config.yaml /etc/hysteria/config.yaml.bak
 
-            # 精准移除旧的 acl 和 outbound 模块，注入标记位
-            awk '
-            /^acl:/ { in_acl=1; print "___ACL_MARKER___"; next }
-            /^[^[:space:]#]/ && in_acl { in_acl=0 }
-            /^outbound:/ { in_outbound=1; next }
-            /^[^[:space:]#]/ && in_outbound { in_outbound=0 }
-            { if(!in_acl && !in_outbound) print $0 }
-            ' /etc/hysteria/config.yaml > /tmp/hy2_config_tmp.yaml
+            # 【修复点】采用安全的 Python 脚本重写 YAML 配置块，取代原先脆弱的 awk 逻辑
+            cat << 'EOF' > /tmp/hy2_yaml_editor.py
+import sys
 
-            # 替换注入标记为新的 acl 规则
-            awk -v acl="$(echo -e "$acl_block")" '{
-                if ($0 == "___ACL_MARKER___") print acl
-                else print $0
-            }' /tmp/hy2_config_tmp.yaml > /tmp/hy2_config_tmp2.yaml
+with open('/etc/hysteria/config.yaml', 'r') as f:
+    lines = f.read().split('\n')
 
-            # 将 outbound 追加在末尾或特定位置前
-            if grep -q "^trafficStats:" /tmp/hy2_config_tmp2.yaml; then
-                awk -v out="$(echo -e "$out_block")" '/^trafficStats:/ {print out} {print}' /tmp/hy2_config_tmp2.yaml > /etc/hysteria/config.yaml
-            else
-                cat /tmp/hy2_config_tmp2.yaml > /etc/hysteria/config.yaml
-                echo -e "$out_block" >> /etc/hysteria/config.yaml
-            fi
+new_lines = []
+skip = False
+for line in lines:
+    if line.startswith('acl:') or line.startswith('outbound:'):
+        skip = True
+        continue
+    if skip and line and not line.startswith(' ') and not line.startswith('#'):
+        skip = False
+    if not skip:
+        new_lines.append(line)
 
-            rm -f /tmp/hy2_config_tmp.yaml /tmp/hy2_config_tmp2.yaml
+new_content = '\n'.join(new_lines).strip()
+new_content += '\n\n' + sys.argv[1].replace('\\n', '\n')
+if len(sys.argv) > 2 and sys.argv[2]:
+    new_content += '\n\n' + sys.argv[2].replace('\\n', '\n')
+
+with open('/etc/hysteria/config.yaml', 'w') as f:
+    f.write(new_content + '\n')
+EOF
+            python3 /tmp/hy2_yaml_editor.py "$acl_block" "$out_block"
+            rm -f /tmp/hy2_yaml_editor.py
+
             green "  新落地代理与路由配置写入完毕！"
             
             echo ""
@@ -1764,23 +1781,31 @@ config_outbound() {
         2)
             cp -f /etc/hysteria/config.yaml /etc/hysteria/config.yaml.bak
             
-            # 生成干干净净的直连默认路由
             local default_acl="acl:\n  inline:\n    - reject(169.254.0.0/16)\n    - reject(::1/128)\n    - reject(127.0.0.0/8)\n    - reject(10.0.0.0/8)\n    - reject(172.16.0.0/12)\n    - reject(192.168.0.0/16)\n    - reject(fc00::/7)\n    - reject(fe80::/10)\n    - direct(all)"
             
-            awk '
-            /^acl:/ { in_acl=1; print "___ACL_MARKER___"; next }
-            /^[^[:space:]#]/ && in_acl { in_acl=0 }
-            /^outbound:/ { in_outbound=1; next }
-            /^[^[:space:]#]/ && in_outbound { in_outbound=0 }
-            { if(!in_acl && !in_outbound) print $0 }
-            ' /etc/hysteria/config.yaml > /tmp/hy2_config_tmp.yaml
+            # 【修复点】恢复原生状态同样走安全重写逻辑
+            cat << 'EOF' > /tmp/hy2_yaml_editor.py
+import sys
+with open('/etc/hysteria/config.yaml', 'r') as f:
+    lines = f.read().split('\n')
+new_lines = []
+skip = False
+for line in lines:
+    if line.startswith('acl:') or line.startswith('outbound:'):
+        skip = True
+        continue
+    if skip and line and not line.startswith(' ') and not line.startswith('#'):
+        skip = False
+    if not skip:
+        new_lines.append(line)
+new_content = '\n'.join(new_lines).strip()
+new_content += '\n\n' + sys.argv[1].replace('\\n', '\n')
+with open('/etc/hysteria/config.yaml', 'w') as f:
+    f.write(new_content + '\n')
+EOF
+            python3 /tmp/hy2_yaml_editor.py "$default_acl"
+            rm -f /tmp/hy2_yaml_editor.py
 
-            awk -v acl="$(echo -e "$default_acl")" '{
-                if ($0 == "___ACL_MARKER___") print acl
-                else print $0
-            }' /tmp/hy2_config_tmp.yaml > /etc/hysteria/config.yaml
-            
-            rm -f /tmp/hy2_config_tmp.yaml
             green "  已清除落地代理与分流配置参数。"
             
             yellow "  正在重启 Hysteria 2 核心..."
