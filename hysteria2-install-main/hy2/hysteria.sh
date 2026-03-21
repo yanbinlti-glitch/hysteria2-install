@@ -67,16 +67,11 @@ if [[ -z $(type -P curl) ]]; then
 fi
 
 realip() {
-    # 强制优先获取 IPv4，避免双栈环境误伤
     ip=$(curl -s4m3 api.ipify.org -k || curl -s4m3 ifconfig.me -k || curl -s4m3 ip.sb -k)
-    
-    # 降级尝试获取 IPv6 (纯 IPv6 环境)
     if [[ -z "$ip" ]]; then
         ip=$(curl -s6m3 api64.ipify.org -k || curl -s6m3 ifconfig.me -k || curl -s6m3 ip.sb -k)
     fi
-    
     ip=$(echo "$ip" | grep -m 1 -E -o "([0-9]{1,3}[\.]){3}[0-9]{1,3}|([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:)*:[0-9a-fA-F]{1,4}")
-    
     if [[ -z "$ip" ]]; then
         echo ""
         red " [错误] 无法获取本机的公网 IP，请检查 VPS 的网络连接或 DNS 设置！"
@@ -155,7 +150,8 @@ check_env() {
     yellow "  正在检查 Hysteria 2 核心及前置依赖包..."
     echo ""
     
-    local cmds=("curl" "wget" "sudo" "ss" "iptables" "python3" "openssl" "socat" "qrencode")
+    # 加入 jq 依赖
+    local cmds=("curl" "wget" "sudo" "ss" "iptables" "python3" "openssl" "socat" "qrencode" "jq")
     local missing=0
 
     for cmd in "${cmds[@]}"; do
@@ -192,18 +188,18 @@ check_env() {
         [[ ! $SYSTEM == "CentOS" ]] && { $PKG_UPDATE || { echo ""; red " [错误] 系统软件源更新失败！请检查网络连接或更换软件源后重试。"; exit 1; }; }
         
         if [[ $SYSTEM == "Alpine" ]]; then
-            $PKG_INSTALL curl wget sudo procps iptables ip6tables iproute2 python3 openssl socat cronie libqrencode-tools || { echo ""; red " [错误] 前置依赖安装失败！请检查系统源或网络后重试。"; exit 1; }
+            $PKG_INSTALL curl wget sudo procps iptables ip6tables iproute2 python3 openssl socat cronie libqrencode-tools jq || { echo ""; red " [错误] 前置依赖安装失败！请检查系统源或网络后重试。"; exit 1; }
             svc_start crond; svc_enable crond
         elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" || $SYSTEM == "Alma" || $SYSTEM == "Rocky" ]]; then
             $PKG_INSTALL epel-release || { echo ""; red " [错误] epel-release 扩展源安装失败！"; exit 1; }
-            $PKG_INSTALL curl wget sudo procps iptables iptables-services iproute python3 openssl socat cronie qrencode || { echo ""; red " [错误] 前置依赖安装失败！请检查系统源或网络后重试。"; exit 1; }
+            $PKG_INSTALL curl wget sudo procps iptables iptables-services iproute python3 openssl socat cronie qrencode jq || { echo ""; red " [错误] 前置依赖安装失败！请检查系统源或网络后重试。"; exit 1; }
             svc_start crond; svc_enable crond
         else
             yellow "  正在尝试修复并清理系统损坏的依赖项..."
             apt-get --fix-broken install -y || { echo ""; red " [错误] 尝试修复系统损坏的依赖项失败！"; exit 1; }
             apt-get autoremove -y
             apt-get clean
-            $PKG_INSTALL curl wget sudo procps iptables-persistent netfilter-persistent iproute2 python3 openssl socat cron qrencode || { echo ""; red " [错误] 前置依赖安装失败！请检查 APT 源或网络后重试。"; exit 1; }
+            $PKG_INSTALL curl wget sudo procps iptables-persistent netfilter-persistent iproute2 python3 openssl socat cron qrencode jq || { echo ""; red " [错误] 前置依赖安装失败！请检查 APT 源或网络后重试。"; exit 1; }
             svc_start cron; svc_enable cron
         fi
         
@@ -252,7 +248,6 @@ inst_cert() {
             domain=$(echo "$domain" | tr -d '\r' | tr -d ' ')
             green " 已记录域名：$domain"
             
-            # 双栈适配：优先提取 IPv4 进行核对
             domainIP=$(DOMAIN="$domain" python3 -c "import socket, os; try: addrs=socket.getaddrinfo(os.environ.get('DOMAIN'), None); ips=[a[4][0] for a in addrs]; v4=[ip for ip in ips if '.' in ip]; print(v4[0] if v4 else ips[0]) except: print('')" 2>/dev/null || echo "")
             
             if [[ -z "$domainIP" ]]; then
@@ -264,7 +259,8 @@ inst_cert() {
                 [[ "$force_cert" != "y" && "$force_cert" != "Y" ]] && exit 1
             elif [[ "$domainIP" != "$ip" ]]; then
                 echo ""
-                yellow " [警告] 域名解析的 IP ($domainIP) 与当前真实 IP ($ip) 不匹配！"
+                yellow " [警告] 域名解析的 IP ($domainIP) 与当前真实 IP ($ip) 不完全匹配！"
+                yellow " [提示] 如果您的服务器是纯 IPv6 环境，这可能是由于 IPv6 缩写格式不一致导致的误报。"
                 yellow " [警告] Hysteria 2 必须使用真实 IP 直连，请确保 Cloudflare 已关闭小云朵 (DNS Only)。"
                 echo -en " ${LIGHT_YELLOW} ▶ 是否确认并继续？(y/n) [默认: y]: ${PLAIN}"
                 read force_cert
@@ -321,7 +317,6 @@ inst_cert() {
             bash /root/.acme.sh/acme.sh --issue --dns dns_cf -d "${domain}" -k ec-256
             mkdir -p /var/www/hysteria/certs
 
-            # 使用 try-restart 增强鲁棒性
             if [[ $SYSTEM == "Alpine" ]]; then
                 local reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && chown -R nobody /var/www/hysteria/certs && (rc-service hysteria-server restart || true) && (rc-service hysteria-sub restart || true)"
             else
@@ -378,6 +373,9 @@ inst_cert() {
 }
 
 inst_port() {
+    firstport=""
+    endport=""
+
     echo ""
     print_line
     echo -en " ${LIGHT_YELLOW} ▶ 设置 Hysteria 2 主端口 [10000-65535] (回车随机): ${PLAIN}"
@@ -429,10 +427,12 @@ inst_port() {
         echo "$firstport:$endport" > /etc/hysteria/port_hop.txt
 
         modprobe ip6table_nat 2>/dev/null || true
+        iptables -I INPUT -p udp --dport $firstport:$endport -m comment --comment "hy2-port-hop-input" -j ACCEPT 2>/dev/null
+        ip6tables -I INPUT -p udp --dport $firstport:$endport -m comment --comment "hy2-port-hop-input" -j ACCEPT 2>/dev/null
+        
         iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop" 2>/dev/null
         ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop" 2>/dev/null
         
-        # 兼容 IPv6 NAT 缺失的系统
         if [[ $? -ne 0 ]]; then
             yellow "  [提示] 当前系统/内核可能不支持 IPv6 NAT，IPv6 端口跳跃已静默跳过。"
         fi
@@ -453,9 +453,10 @@ inst_sub_port(){
     read sub_port_input
     [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 10000-30000 -n 1)
     
-    # 修复：增加了防冲突检验，避免与跳跃端口范围冲突
-    while [[ ! "$sub_port_input" =~ ^[0-9]+$ ]] || [[ "$sub_port_input" -lt 1024 ]] || [[ "$sub_port_input" -gt 65535 ]] || { [[ -n "$firstport" && -n "$endport" ]] && [[ "$sub_port_input" -ge "$firstport" && "$sub_port_input" -le "$endport" ]]; }; do
-        if [[ -n "$firstport" && -n "$endport" && "$sub_port_input" -ge "$firstport" && "$sub_port_input" -le "$endport" ]]; then
+    while [[ ! "$sub_port_input" =~ ^[0-9]+$ ]] || [[ "$sub_port_input" -lt 1024 ]] || [[ "$sub_port_input" -gt 65535 ]] || [[ "$sub_port_input" == "$port" ]] || { [[ -n "$firstport" && -n "$endport" ]] && [[ "$sub_port_input" -ge "$firstport" && "$sub_port_input" -le "$endport" ]]; }; do
+        if [[ "$sub_port_input" == "$port" ]]; then
+            red " [警告] 订阅端口不能与 Hysteria 主端口 ($port) 冲突！"
+        elif [[ -n "$firstport" && -n "$endport" && "$sub_port_input" -ge "$firstport" && "$sub_port_input" -le "$endport" ]]; then
             red " [警告] 订阅端口不能与跳跃端口范围 ($firstport-$endport) 重叠冲突！"
         else
             red " [警告] 端口必须在 1024-65535 之间！"
@@ -495,7 +496,6 @@ inst_other_configs() {
     read custom_node_name
     [[ -z $custom_node_name ]] && custom_node_name="Hysteria2_Node"
     
-    # 修复：增加防阻断下的证书跳过选项
     echo ""
     echo -en " ${LIGHT_YELLOW} ▶ 是否在客户端配置中强制开启 '跳过证书验证' (防 SNI 阻断/高墙推荐)？(y/n) [默认: y]: ${PLAIN}"
     read force_skip_cert
@@ -582,21 +582,24 @@ clean_env() {
         iptables -t nat -nL PREROUTING --line-numbers 2>/dev/null | grep "hy2-port-hop" | awk '{print $1}' | sort -nr | while read -r num; do
             iptables -t nat -D PREROUTING "$num" 2>/dev/null
         done
+        iptables -nL INPUT --line-numbers 2>/dev/null | grep "hy2-port-hop-input" | awk '{print $1}' | sort -nr | while read -r num; do
+            iptables -D INPUT "$num" 2>/dev/null
+        done
     fi
     if command -v ip6tables >/dev/null; then
         ip6tables -t nat -nL PREROUTING --line-numbers 2>/dev/null | grep "hy2-port-hop" | awk '{print $1}' | sort -nr | while read -r num; do
             ip6tables -t nat -D PREROUTING "$num" 2>/dev/null
         done
+        ip6tables -nL INPUT --line-numbers 2>/dev/null | grep "hy2-port-hop-input" | awk '{print $1}' | sort -nr | while read -r num; do
+            ip6tables -D INPUT "$num" 2>/dev/null
+        done
     fi
 
-    # 清除端口跳跃残留的 INPUT 规则
     if [[ -f /etc/hysteria/port_hop.txt ]]; then
         local hop_range=$(cat /etc/hysteria/port_hop.txt | tr -d '\r')
         local f_port=$(echo "$hop_range" | cut -d':' -f1)
         local e_port=$(echo "$hop_range" | cut -d':' -f2)
         if [[ -n "$f_port" && -n "$e_port" ]]; then
-            iptables -D INPUT -p udp --dport "$f_port:$e_port" -j ACCEPT 2>/dev/null
-            ip6tables -D INPUT -p udp --dport "$f_port:$e_port" -j ACCEPT 2>/dev/null
             if command -v ufw >/dev/null; then ufw delete allow "$f_port:$e_port/udp" 2>/dev/null; fi
             if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
                 firewall-cmd --zone=public --remove-port="$f_port-$e_port/udp" --permanent 2>/dev/null
@@ -608,8 +611,7 @@ clean_env() {
     svc_stop hysteria-server 2>/dev/null; svc_disable hysteria-server 2>/dev/null
     svc_stop hysteria-sub 2>/dev/null; svc_disable hysteria-sub 2>/dev/null
     
-    # 修复：防止 Python 服务挂起遗留孤儿进程
-    pkill -f "server.py" 2>/dev/null || true
+    pkill -f "/var/www/hysteria/server.py" 2>/dev/null || true
 
     if [[ $SYSTEM == "Alpine" ]]; then
         rm -f /etc/init.d/hysteria-server /etc/init.d/hysteria-sub
@@ -635,10 +637,8 @@ clean_env() {
 generate_client_configs() {
     realip
     
-    # 稳健的密码提取，剥离双引号
     local raw_pwd=$(awk '/^auth:/,0' /etc/hysteria/config.yaml | grep -E '^[[:space:]]*password:' | head -n 1 | sed 's/.*password:[[:space:]]*//; s/["'\''\r]//g')
     
-    # 彻底的 URL Safe 编码处理 (避免特殊字符断裂 URI)
     local s_pwd=$(PWD="$raw_pwd" python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ.get('PWD', '')))")
     local safe_node_name=$(NAME="$custom_node_name" python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ.get('NAME', '')))")
     
@@ -694,7 +694,6 @@ generate_client_configs() {
     local url="hy2://$s_pwd@$uri_ip:$primary_port/?insecure=${is_insecure_url}&sni=$c_domain${mport_param}${obfs_param}#${safe_node_name}"
     echo "$url" > "$web_dir/$sub_uuid/url.txt"
     
-    # Base64 去换行符保险策略
     printf "%s" "$url" | base64 -w 0 2>/dev/null > "$web_dir/$sub_uuid/sub_b64.txt" || printf "%s" "$url" | base64 | tr -d '\r\n' > "$web_dir/$sub_uuid/sub_b64.txt"
 
     cat << EOF > "$web_dir/$sub_uuid/clash-meta-sub.yaml"
@@ -744,7 +743,6 @@ EOF
     chown -R nobody "$sub_cert_dir"
     chmod 400 "$sub_cert_dir/private.key"
     
-    # 多线程防阻塞的 ThreadingTCPServer
     cat << EOF > "$web_dir/server.py"
 import http.server
 import socketserver
@@ -938,7 +936,8 @@ EOF
     inst_sub_port
     inst_other_configs
 
-    if [[ "$hy_domain" == "www.bing.com" ]]; then
+    local user_force_skip=$(cat /etc/hysteria/force_skip_cert.txt 2>/dev/null || echo "0")
+    if [[ "$hy_domain" == "www.bing.com" || "$user_force_skip" == "1" ]]; then
         cert_insecure_yaml="true"
         cert_insecure_url="1"
     else
@@ -1285,8 +1284,7 @@ starthysteria() {
 stophysteria_only() {
     svc_stop hysteria-server
     svc_stop hysteria-sub
-    # 修复：确保 Python 进程被杀死
-    pkill -f "server.py" 2>/dev/null || true
+    pkill -f "/var/www/hysteria/server.py" 2>/dev/null || true
     echo ""
     yellow "  Hysteria 2 及订阅服务已停止！"
 }
@@ -1333,11 +1331,9 @@ enable_bbr() {
     
     local total_mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
     
-    # 获取系统动态页面大小，规避 ARM64 的 OOM 问题
     local page_size=$(getconf PAGESIZE 2>/dev/null)
     [[ -z "$page_size" || ! "$page_size" =~ ^[0-9]+$ ]] && page_size=4096
     
-    # 修复：规避 32 位系统计算整型溢出导致负数的错误
     local mem_pages=$(( total_mem_kb / (page_size / 1024) ))
     
     local udp_max=$(( mem_pages / 4 ))
@@ -1448,7 +1444,6 @@ check_cert() {
             yellow "  ▶ 证书生效日期    : $cert_start"
 
             if command -v python3 >/dev/null; then
-                # 过滤单数日期双空格问题
                 local days_left=$(python3 -c "import datetime; t_str = ' '.join('$cert_end'.split()); t=datetime.datetime.strptime(t_str, '%b %d %H:%M:%S %Y %Z'); print((t - datetime.datetime.now()).days)" 2>/dev/null)
             else
                 local end_epoch=$(date -d "$cert_end" +%s 2>/dev/null)
@@ -1577,7 +1572,7 @@ config_outbound() {
     clear
     echo ""
     print_line
-    green "                 Hysteria 2 落地代理 (静态住宅 IP 中转) 设置               "
+    green "                 Hysteria 2 落地代理与分流 (IP 中转) 设置               "
     print_line
     echo ""
 
@@ -1586,12 +1581,29 @@ config_outbound() {
         sleep 2; return
     fi
 
-    # 检查当前是否开启了 outbound
+    if ! command -v jq >/dev/null; then
+        yellow "  检测到系统缺失 jq 组件，正在自动安装..."
+        if [[ $SYSTEM == "Ubuntu" || $SYSTEM == "Debian" ]]; then
+            apt-get update -y && apt-get install -y jq
+        elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" || $SYSTEM == "Alma" || $SYSTEM == "Rocky" ]]; then
+            yum install -y epel-release && yum install -y jq
+        elif [[ $SYSTEM == "Alpine" ]]; then
+            apk update && apk add jq
+        fi
+    fi
+
+    # 检查当前是否开启了 outbound 及路由模式
     if grep -q "^outbound:" /etc/hysteria/config.yaml; then
         local current_type=$(awk '/^outbound:/{getline; print $2}' /etc/hysteria/config.yaml | tr -d '\r')
-        yellow "  当前状态: [已开启] 落地代理模式 (类型: $current_type)"
+        local route_mode_str="未知/自定义"
+        if grep -q "proxy(all)" /etc/hysteria/config.yaml; then
+            route_mode_str="全局代理"
+        elif grep -q "proxy(suffix:netflix.com)" /etc/hysteria/config.yaml; then
+            route_mode_str="智能分流 (AI+流媒体)"
+        fi
         
-        # 提取当前代理地址用于展示
+        yellow "  当前状态: [已开启] 落地代理模式 (类型: $current_type | 路由: $route_mode_str)"
+        
         local current_addr=""
         if [[ "$current_type" == "socks5" ]]; then
             current_addr=$(awk '/socks5:/{getline; print $2}' /etc/hysteria/config.yaml | awk '/addr:/{print $2}' | tr -d '\r')
@@ -1604,9 +1616,9 @@ config_outbound() {
     fi
     echo ""
     
-    echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}配置 / 修改 落地代理 (支持一键粘贴完整 URI 格式)${PLAIN}"
-    echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_RED}退回 服务器直连 (关闭当前落地代理)${PLAIN}"
-    echo -e "    ${LIGHT_GREEN}[3]${PLAIN} ${LIGHT_YELLOW}检查 落地状态 (验证静态住宅 IP 与核心状态)${PLAIN}"
+    echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}配置 / 修改 落地代理与分流 (支持一键粘贴完整 URI 格式)${PLAIN}"
+    echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_RED}退回 服务器本机直连 (关闭当前落地代理)${PLAIN}"
+    echo -e "    ${LIGHT_GREEN}[3]${PLAIN} ${LIGHT_YELLOW}检查 落地状态 (验证出口连通性、IP 归属地与核心状态)${PLAIN}"
     echo ""
     echo -e "    ${LIGHT_GREEN}[0]${PLAIN} ${LIGHT_PURPLE}返回主菜单${PLAIN}"
     echo ""
@@ -1624,7 +1636,6 @@ config_outbound() {
 
             proxy_uri=$(echo "$proxy_uri" | tr -d '\r' | tr -d ' ')
 
-            # 正则解析 URI 字符串
             local out_type=""
             local out_user=""
             local out_pass=""
@@ -1647,31 +1658,49 @@ config_outbound() {
             fi
 
             echo ""
-            yellow "  正在测试静态住宅 IP 代理的连通性..."
+            yellow "  正在测试代理连通性并获取归属地信息 (限时 7 秒)..."
             
-            # 兼容 curl 的原生代理测试格式
             local curl_proxy="$proxy_uri"
-            local test_res=$(curl -x "$curl_proxy" -s -m 7 https://api.ipify.org)
+            local geo_info=$(curl -x "$curl_proxy" -s -m 7 "http://ip-api.com/json/?lang=zh-CN")
+            local api_status=$(echo "$geo_info" | jq -r '.status' 2>/dev/null)
             
-            if [[ -n "$test_res" && ("$test_res" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ || "$test_res" =~ :) ]]; then
-                green "  [✔] 代理连通测试成功！获取到静态住宅出口 IP: ${test_res}"
+            if [[ "$api_status" == "success" ]]; then
+                local out_ip=$(echo "$geo_info" | jq -r '.query')
+                local out_country=$(echo "$geo_info" | jq -r '.country')
+                local out_city=$(echo "$geo_info" | jq -r '.city')
+                local out_isp=$(echo "$geo_info" | jq -r '.isp')
+                
+                green "  [✔] 代理连通测试成功！"
+                print_line
+                green "  ▶ 落地 IP  : $out_ip"
+                green "  ▶ 归属地区 : $out_country - $out_city"
+                green "  ▶ 运营商   : $out_isp"
+                print_line
             else
-                red "  [✘] 代理测试失败！无法通过该代理连接外网 (请求超时或验证被拒绝)。"
+                red "  [✘] 代理测试失败！无法通过该代理连接外网，或连接超时。"
+                yellow "  ▶ 调试信息: ${geo_info:-"获取不到数据，代理死链、限流或格式错误"}"
                 echo -en " ${LIGHT_YELLOW} ▶ 代理可能无效，是否强制保存并继续？(y/n) [默认: n]: ${PLAIN}"
                 read force_save
                 [[ "$force_save" != "y" && "$force_save" != "Y" ]] && { yellow "  已取消中转配置。"; sleep 2; return; }
             fi
 
-            cp -f /etc/hysteria/config.yaml /etc/hysteria/config.yaml.bak
+            echo ""
+            yellow "  ▶ 请选择路由分流模式："
+            echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}智能分流 (仅解锁流媒体 Netflix/Disney 等与 AI 平台，兼顾网速) - 推荐${PLAIN}"
+            echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_PURPLE}全局代理 (所有流量 100% 通过落地 IP 转发)${PLAIN}"
+            echo ""
+            echo -en " ${LIGHT_YELLOW} ▶ 请输入选项 [1-2] (默认1): ${PLAIN}"
+            read route_mode
+            [[ -z "$route_mode" ]] && route_mode=1
 
-            # 精准删除旧的 outbound 块
-            awk '
-            /^outbound:/ { in_outbound=1; next }
-            /^[^[:space:]#]/ && !/^outbound:/ { if(in_outbound) in_outbound=0 }
-            { if(!in_outbound) print $0 }
-            ' /etc/hysteria/config.yaml > /tmp/hy2_config_tmp.yaml
+            local acl_block="acl:\n  inline:\n    - reject(169.254.0.0/16)\n    - reject(::1/128)\n    - reject(127.0.0.0/8)\n    - reject(10.0.0.0/8)\n    - reject(172.16.0.0/12)\n    - reject(192.168.0.0/16)\n    - reject(fc00::/7)\n    - reject(fe80::/10)\n"
             
-            # 构建新的 outbound 块
+            if [[ "$route_mode" == 1 ]]; then
+                acl_block+="    - proxy(suffix:openai.com)\n    - proxy(suffix:chatgpt.com)\n    - proxy(suffix:anthropic.com)\n    - proxy(suffix:claude.ai)\n    - proxy(suffix:ai.ndai.top)\n    - proxy(suffix:netflix.com)\n    - proxy(suffix:nflxvideo.net)\n    - proxy(suffix:nflxext.com)\n    - proxy(suffix:nflxso.net)\n    - proxy(suffix:disneyplus.com)\n    - proxy(suffix:dssott.com)\n    - proxy(suffix:bamgrid.com)\n    - proxy(suffix:hulu.com)\n    - proxy(suffix:primevideo.com)\n    - proxy(suffix:amazon.video)\n    - proxy(suffix:spotify.com)\n    - direct(all)"
+            else
+                acl_block+="    - proxy(all)"
+            fi
+
             local out_block="outbound:\n"
             if [[ "$out_type" == "socks5" ]]; then
                 out_block+="  type: socks5\n  socks5:\n    addr: $out_addr\n"
@@ -1680,18 +1709,34 @@ config_outbound() {
                 out_block+="  type: http\n  http:\n    url: $proxy_uri\n"
             fi
 
-            # 安全插入配置末尾
-            if grep -q "^trafficStats:" /tmp/hy2_config_tmp.yaml; then
-                awk -v block="$(echo -e "$out_block")" '/^trafficStats:/ {print block} {print}' /tmp/hy2_config_tmp.yaml > /tmp/hy2_config_tmp2.yaml
-                mv -f /tmp/hy2_config_tmp2.yaml /tmp/hy2_config_tmp.yaml
+            cp -f /etc/hysteria/config.yaml /etc/hysteria/config.yaml.bak
+
+            # 精准移除旧的 acl 和 outbound 模块，注入标记位
+            awk '
+            /^acl:/ { in_acl=1; print "___ACL_MARKER___"; next }
+            /^[^[:space:]#]/ && in_acl { in_acl=0 }
+            /^outbound:/ { in_outbound=1; next }
+            /^[^[:space:]#]/ && in_outbound { in_outbound=0 }
+            { if(!in_acl && !in_outbound) print $0 }
+            ' /etc/hysteria/config.yaml > /tmp/hy2_config_tmp.yaml
+
+            # 替换注入标记为新的 acl 规则
+            awk -v acl="$(echo -e "$acl_block")" '{
+                if ($0 == "___ACL_MARKER___") print acl
+                else print $0
+            }' /tmp/hy2_config_tmp.yaml > /tmp/hy2_config_tmp2.yaml
+
+            # 将 outbound 追加在末尾或特定位置前
+            if grep -q "^trafficStats:" /tmp/hy2_config_tmp2.yaml; then
+                awk -v out="$(echo -e "$out_block")" '/^trafficStats:/ {print out} {print}' /tmp/hy2_config_tmp2.yaml > /etc/hysteria/config.yaml
             else
-                echo -e "$out_block" >> /tmp/hy2_config_tmp.yaml
+                cat /tmp/hy2_config_tmp2.yaml > /etc/hysteria/config.yaml
+                echo -e "$out_block" >> /etc/hysteria/config.yaml
             fi
 
-            mv -f /tmp/hy2_config_tmp.yaml /etc/hysteria/config.yaml
-            green "  新落地代理配置写入完毕！"
+            rm -f /tmp/hy2_config_tmp.yaml /tmp/hy2_config_tmp2.yaml
+            green "  新落地代理与路由配置写入完毕！"
             
-            # 强制重启核心使其生效
             echo ""
             yellow "  正在重启 Hysteria 2 核心应用配置..."
             svc_stop hysteria-server 2>/dev/null
@@ -1719,14 +1764,24 @@ config_outbound() {
         2)
             cp -f /etc/hysteria/config.yaml /etc/hysteria/config.yaml.bak
             
-            awk '
-            /^outbound:/ { in_outbound=1; next }
-            /^[^[:space:]#]/ && !/^outbound:/ { if(in_outbound) in_outbound=0 }
-            { if(!in_outbound) print $0 }
-            ' /etc/hysteria/config.yaml > /tmp/hy2_config_tmp.yaml
+            # 生成干干净净的直连默认路由
+            local default_acl="acl:\n  inline:\n    - reject(169.254.0.0/16)\n    - reject(::1/128)\n    - reject(127.0.0.0/8)\n    - reject(10.0.0.0/8)\n    - reject(172.16.0.0/12)\n    - reject(192.168.0.0/16)\n    - reject(fc00::/7)\n    - reject(fe80::/10)\n    - direct(all)"
             
-            mv -f /tmp/hy2_config_tmp.yaml /etc/hysteria/config.yaml
-            green "  已清除落地代理配置参数。"
+            awk '
+            /^acl:/ { in_acl=1; print "___ACL_MARKER___"; next }
+            /^[^[:space:]#]/ && in_acl { in_acl=0 }
+            /^outbound:/ { in_outbound=1; next }
+            /^[^[:space:]#]/ && in_outbound { in_outbound=0 }
+            { if(!in_acl && !in_outbound) print $0 }
+            ' /etc/hysteria/config.yaml > /tmp/hy2_config_tmp.yaml
+
+            awk -v acl="$(echo -e "$default_acl")" '{
+                if ($0 == "___ACL_MARKER___") print acl
+                else print $0
+            }' /tmp/hy2_config_tmp.yaml > /etc/hysteria/config.yaml
+            
+            rm -f /tmp/hy2_config_tmp.yaml
+            green "  已清除落地代理与分流配置参数。"
             
             yellow "  正在重启 Hysteria 2 核心..."
             svc_stop hysteria-server 2>/dev/null
@@ -1744,7 +1799,6 @@ config_outbound() {
                 local current_type=$(awk '/^outbound:/{getline; print $2}' /etc/hysteria/config.yaml | tr -d '\r')
                 local curl_proxy=""
                 
-                # 提取供 curl 测试使用的格式
                 if [[ "$current_type" == "socks5" ]]; then
                     local s_addr=$(awk '/socks5:/{getline; print $2}' /etc/hysteria/config.yaml | awk '/addr:/{print $2}' | tr -d '\r')
                     local s_user=$(awk '/socks5:/{getline; getline; print $0}' /etc/hysteria/config.yaml | awk '/username:/{print $2}' | tr -d '\r')
@@ -1760,9 +1814,19 @@ config_outbound() {
 
                 echo ""
                 yellow "  [1/2] 测试外网 TCP 连通性与真实出口 IP 伪装度..."
-                local test_ip=$(curl -x "$curl_proxy" -s -m 5 https://api.ipify.org)
-                if [[ -n "$test_ip" && ("$test_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ || "$test_ip" =~ :) ]]; then
-                    green "  [✔] 落地状态正常！您的最终出口 IP 现为: $test_ip"
+                local geo_info=$(curl -x "$curl_proxy" -s -m 7 "http://ip-api.com/json/?lang=zh-CN")
+                local api_status=$(echo "$geo_info" | jq -r '.status' 2>/dev/null)
+                
+                if [[ "$api_status" == "success" ]]; then
+                    local test_ip=$(echo "$geo_info" | jq -r '.query')
+                    local test_country=$(echo "$geo_info" | jq -r '.country')
+                    local test_city=$(echo "$geo_info" | jq -r '.city')
+                    local test_isp=$(echo "$geo_info" | jq -r '.isp')
+                    
+                    green "  [✔] 落地状态正常！您的最终出口已被伪装："
+                    yellow "  ▶ 出口 IP : $test_ip"
+                    yellow "  ▶ 归属地  : $test_country - $test_city"
+                    yellow "  ▶ 运营商  : $test_isp"
                 else
                     red "  [✘] 测试失败！您的静态住宅代理可能已过期、被封禁或格式错误导致无法连通网络。"
                 fi
@@ -1819,7 +1883,7 @@ menu() {
     echo "----------------------------------------------------------------------------------"
     echo -e "  ${LIGHT_GREEN}[3]${PLAIN} ${LIGHT_YELLOW}启动 / 停止 / 重启服务${PLAIN}"
     echo -e "  ${LIGHT_GREEN}[4]${PLAIN} ${LIGHT_PURPLE}查看 / 修改 配置文件${PLAIN}"
-    echo -e "  ${LIGHT_GREEN}[5]${PLAIN} ${LIGHT_GREEN}配置 出口落地代理 (中转模式 & 深度诊断)${PLAIN}"
+    echo -e "  ${LIGHT_GREEN}[5]${PLAIN} ${LIGHT_GREEN}配置 出口落地代理与分流 (IP 检测 & 流媒体解锁)${PLAIN}"
     echo "----------------------------------------------------------------------------------"
     echo -e "  ${LIGHT_GREEN}[6]${PLAIN} ${LIGHT_GREEN}获取 节点配置 与 订阅链接${PLAIN}"
     echo -e "  ${LIGHT_GREEN}[7]${PLAIN} ${LIGHT_YELLOW}查看 客户端连接 与 流量统计${PLAIN}"
