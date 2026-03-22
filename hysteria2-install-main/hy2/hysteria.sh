@@ -251,19 +251,19 @@ inst_cert() {
             domain=$(echo "$domain" | tr -d '\r' | tr -d ' ')
             green " 已记录域名：$domain"
             
-            # 【修复点】增强域名检测，双栈检测
-            domainIP=$(DOMAIN="$domain" python3 -c "import socket, os; try: addrs=socket.getaddrinfo(os.environ.get('DOMAIN'), None); ips=[a[4][0] for a in addrs]; v4=[ip for ip in ips if '.' in ip]; print(v4[0] if v4 else ips[0]) except: print('')" 2>/dev/null || echo "")
+            # 【优化】支持双栈环境多 IP 聚合匹配，减少误报
+            domainIPs=$(DOMAIN="$domain" python3 -c "import socket, os; try: addrs=socket.getaddrinfo(os.environ.get('DOMAIN'), None); print(' '.join(list(set([a[4][0] for a in addrs])))) except: print('')" 2>/dev/null || echo "")
             
-            if [[ -z "$domainIP" ]]; then
+            if [[ -z "$domainIPs" ]]; then
                 echo ""
                 yellow " [警告] 无法解析域名 ${domain} 的 IP 地址！请确认域名已正确解析。"
                 echo -en " ${LIGHT_YELLOW} ▶ 是否强制继续？(y/n) [默认: y]: ${PLAIN}"
                 read force_cert
                 [[ -z "$force_cert" ]] && force_cert="y"
                 [[ "$force_cert" != "y" && "$force_cert" != "Y" ]] && exit 1
-            elif [[ "$domainIP" != "$ip" ]]; then
+            elif ! echo "$domainIPs" | grep -q "$ip"; then
                 echo ""
-                yellow " [警告] 域名解析的 IP ($domainIP) 与当前真实 IP ($ip) 不完全匹配！"
+                yellow " [警告] 域名解析的 IP 列表 ($domainIPs) 中未完全匹配当前真实 IP ($ip)！"
                 yellow " [提示] 如果您的服务器是纯 IPv6 环境，这可能是由于 IPv6 缩写格式不一致导致的误报。"
                 yellow " [警告] Hysteria 2 必须使用真实 IP 直连，请确保 Cloudflare 已关闭小云朵 (DNS Only)。"
                 echo -en " ${LIGHT_YELLOW} ▶ 是否确认并继续？(y/n) [默认: y]: ${PLAIN}"
@@ -335,7 +335,6 @@ inst_cert() {
                 green " 证书申请成功！已保存至 /root/ 目录下。"
                 hy_domain="$domain"
                 
-                # 【修复点】全局化 Acme 证书路径
                 cert_path="/var/www/hysteria/certs/cert.crt"
                 key_path="/var/www/hysteria/certs/private.key"
                 cp -f /root/cert.crt "$cert_path"
@@ -441,7 +440,6 @@ inst_port() {
         ip6tables -I INPUT -p udp --dport $firstport:$endport -m comment --comment "hy2-port-hop-input" -j ACCEPT 2>/dev/null || true
         
         iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop" 2>/dev/null
-        # 【修复点】避免无 IPv6 NAT 模块时报错中断
         ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port -m comment --comment "hy2-port-hop" 2>/dev/null || true
         
         if [[ $? -ne 0 ]]; then
@@ -589,19 +587,17 @@ clean_env() {
     [[ -n "$main_port" && "$main_port" =~ ^[0-9]+$ ]] && close_port "$main_port" "udp"
     [[ -n "$sub_port" && "$sub_port" =~ ^[0-9]+$ ]] && close_port "$sub_port" "tcp"
 
-    # 【修复点】彻底淘汰易漂移的 --line-numbers 语法，改用 iptables-save 安全过滤
-    if command -v iptables-save >/dev/null; then
-        iptables-save | grep -v "hy2-port-hop" | iptables-restore 2>/dev/null || true
-    fi
-    if command -v ip6tables-save >/dev/null; then
-        ip6tables-save | grep -v "hy2-port-hop" | ip6tables-restore 2>/dev/null || true
-    fi
-
+    # 【修复】采用精准匹配删除，摒弃可能破坏 Docker 与其他容器环境的 iptables-restore 大法
     if [[ -f /etc/hysteria/port_hop.txt ]]; then
         local hop_range=$(cat /etc/hysteria/port_hop.txt | tr -d '\r')
         local f_port=$(echo "$hop_range" | cut -d':' -f1)
         local e_port=$(echo "$hop_range" | cut -d':' -f2)
         if [[ -n "$f_port" && -n "$e_port" ]]; then
+            iptables -D INPUT -p udp --dport $f_port:$e_port -m comment --comment "hy2-port-hop-input" -j ACCEPT 2>/dev/null
+            ip6tables -D INPUT -p udp --dport $f_port:$e_port -m comment --comment "hy2-port-hop-input" -j ACCEPT 2>/dev/null
+            iptables -t nat -D PREROUTING -p udp --dport $f_port:$e_port -j REDIRECT --to-ports $main_port -m comment --comment "hy2-port-hop" 2>/dev/null
+            ip6tables -t nat -D PREROUTING -p udp --dport $f_port:$e_port -j REDIRECT --to-ports $main_port -m comment --comment "hy2-port-hop" 2>/dev/null
+
             if command -v ufw >/dev/null; then ufw delete allow "$f_port:$e_port/udp" 2>/dev/null; fi
             if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
                 firewall-cmd --zone=public --remove-port="$f_port-$e_port/udp" --permanent 2>/dev/null
@@ -689,7 +685,8 @@ generate_client_configs() {
     local web_dir="/var/www/hysteria"
     mkdir -p "$web_dir"
 
-    local sub_uuid=$(gen_random_str 16)
+    local sub_uuid=$(cat /etc/hysteria/sub_path.txt 2>/dev/null)
+    [[ -z "$sub_uuid" ]] && sub_uuid=$(gen_random_str 16)
     mkdir -p "$web_dir/$sub_uuid"
     echo "$sub_uuid" > /etc/hysteria/sub_path.txt
 
@@ -745,6 +742,7 @@ EOF
     chown -R nobody "$sub_cert_dir"
     chmod 400 "$sub_cert_dir/private.key"
     
+    # 【优化】Python 订阅服务器支持热重载，每次请求动态读取文件，免去重启进程烦恼
     cat << EOF > "$web_dir/server.py"
 import http.server
 import socketserver
@@ -757,15 +755,7 @@ PORT = $sub_port
 SUB_UUID = "$sub_uuid"
 CERT_FILE = "$sub_cert_dir/cert.crt"
 KEY_FILE = "$sub_cert_dir/private.key"
-
-try:
-    with open("$web_dir/$sub_uuid/clash-meta-sub.yaml", 'rb') as f:
-        CLASH_DATA = f.read()
-    with open("$web_dir/$sub_uuid/sub_b64.txt", 'rb') as f:
-        B64_DATA = f.read()
-except FileNotFoundError:
-    CLASH_DATA = b""
-    B64_DATA = b""
+WEB_DIR = "$web_dir"
 
 class SecureSubHandler(http.server.BaseHTTPRequestHandler):
     server_version = "nginx/1.24.0"
@@ -776,6 +766,15 @@ class SecureSubHandler(http.server.BaseHTTPRequestHandler):
         req_path = parsed.path.strip('/')
         
         if req_path == SUB_UUID:
+            try:
+                with open(f"{WEB_DIR}/{SUB_UUID}/clash-meta-sub.yaml", 'rb') as f:
+                    clash_data = f.read()
+                with open(f"{WEB_DIR}/{SUB_UUID}/sub_b64.txt", 'rb') as f:
+                    b64_data = f.read()
+            except FileNotFoundError:
+                clash_data = b""
+                b64_data = b""
+
             self.send_response(200)
             self.send_header('Content-type', 'text/plain; charset=utf-8')
             self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
@@ -784,9 +783,9 @@ class SecureSubHandler(http.server.BaseHTTPRequestHandler):
             
             ua = self.headers.get('User-Agent', '').lower()
             if any(x in ua for x in ['clash', 'meta', 'verge', 'stash', 'mihomo']):
-                self.wfile.write(CLASH_DATA)
+                self.wfile.write(clash_data)
             else:
-                self.wfile.write(B64_DATA + b"\n")
+                self.wfile.write(b64_data + b"\n")
         else:
             self.send_response(403)
             self.send_header('Content-type', 'text/html; charset=utf-8')
@@ -852,7 +851,6 @@ WorkingDirectory=${web_dir}
 ExecStart=${py_path} ${web_dir}/server.py
 Restart=always
 RestartSec=3
-# 【修复点】控制日志大小，防止挤爆系统磁盘
 StandardOutput=journal
 StandardError=journal
 LogRateLimitIntervalSec=0
@@ -894,7 +892,9 @@ insthysteria() {
         *) red " [错误] 不支持的架构: $arch" && exit 1 ;;
     esac
     
-    wget --timeout=10 --tries=3 -N -v -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}"
+    # 【优化】增加 GitHub 镜像站 Fallback 防失联下载机制
+    wget --timeout=10 --tries=3 -N -v -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}" || \
+    wget --timeout=10 --tries=3 -N -v -O /usr/local/bin/hysteria "https://mirror.ghproxy.com/https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}"
     
     if [[ ! -s /usr/local/bin/hysteria ]]; then
         red " [错误] Hysteria 2 核心下载失败或文件损坏，请根据上方输出排查网络！"
@@ -1340,8 +1340,10 @@ enable_bbr() {
     
     local total_mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
     
+    # 【修复】防止容器环境读取不到内存而引发除零崩溃
+    [[ -z "$total_mem_kb" ]] && total_mem_kb=1048576 
+    
     local page_size=$(getconf PAGESIZE 2>/dev/null)
-    # 【修复点】确保在极简容器下 getconf 失败时具备安全的默认值，防止除0错误
     if ! [[ "$page_size" =~ ^[0-9]+$ ]] || [[ "$page_size" -le 0 ]]; then
         page_size=4096
     fi
@@ -1614,7 +1616,7 @@ config_outbound() {
             route_mode_str="智能分流 (AI+流媒体)"
         fi
         
-        yellow "  当前状态: [已开启] 落地代理模式 (类型: $current_type | 路由: $route_mode_str)"
+        yellow "  当前状态: [已开启] 落地代理模式 (类型: $current_type |路由: $route_mode_str)"
         
         local current_addr=""
         if [[ "$current_type" == "socks5" ]]; then
@@ -1715,15 +1717,18 @@ config_outbound() {
 
             local out_block="outbound:\n"
             if [[ "$out_type" == "socks5" ]]; then
+                # 【优化】单引号转移防 YAML 注入，确保中转代理特殊密码不出错
+                local safe_user=$(echo "$out_user" | sed "s/'/''/g")
+                local safe_pass=$(echo "$out_pass" | sed "s/'/''/g")
+                
                 out_block+="  type: socks5\n  socks5:\n    addr: $out_addr\n"
-                [[ -n "$out_user" ]] && out_block+="    username: $out_user\n    password: $out_pass\n"
+                [[ -n "$out_user" ]] && out_block+="    username: '${safe_user}'\n    password: '${safe_pass}'\n"
             else
                 out_block+="  type: http\n  http:\n    url: $proxy_uri\n"
             fi
 
             cp -f /etc/hysteria/config.yaml /etc/hysteria/config.yaml.bak
 
-            # 【修复点】采用安全的 Python 脚本重写 YAML 配置块，取代原先脆弱的 awk 逻辑
             cat << 'EOF' > /tmp/hy2_yaml_editor.py
 import sys
 
@@ -1783,7 +1788,6 @@ EOF
             
             local default_acl="acl:\n  inline:\n    - reject(169.254.0.0/16)\n    - reject(::1/128)\n    - reject(127.0.0.0/8)\n    - reject(10.0.0.0/8)\n    - reject(172.16.0.0/12)\n    - reject(192.168.0.0/16)\n    - reject(fc00::/7)\n    - reject(fe80::/10)\n    - direct(all)"
             
-            # 【修复点】恢复原生状态同样走安全重写逻辑
             cat << 'EOF' > /tmp/hy2_yaml_editor.py
 import sys
 with open('/etc/hysteria/config.yaml', 'r') as f:
@@ -1826,8 +1830,8 @@ EOF
                 
                 if [[ "$current_type" == "socks5" ]]; then
                     local s_addr=$(awk '/socks5:/{getline; print $2}' /etc/hysteria/config.yaml | awk '/addr:/{print $2}' | tr -d '\r')
-                    local s_user=$(awk '/socks5:/{getline; getline; print $0}' /etc/hysteria/config.yaml | awk '/username:/{print $2}' | tr -d '\r')
-                    local s_pass=$(awk '/socks5:/{getline; getline; getline; print $0}' /etc/hysteria/config.yaml | awk '/password:/{print $2}' | tr -d '\r')
+                    local s_user=$(awk '/socks5:/{getline; getline; print $0}' /etc/hysteria/config.yaml | awk '/username:/{print $2}' | tr -d '\r' | tr -d "'")
+                    local s_pass=$(awk '/socks5:/{getline; getline; getline; print $0}' /etc/hysteria/config.yaml | awk '/password:/{print $2}' | tr -d '\r' | tr -d "'")
                     if [[ -n "$s_user" ]]; then
                         curl_proxy="socks5h://${s_user}:${s_pass}@${s_addr}"
                     else
