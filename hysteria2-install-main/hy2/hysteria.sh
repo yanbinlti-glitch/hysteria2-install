@@ -1610,9 +1610,9 @@ config_outbound() {
     if grep -q "^outbound:" /etc/hysteria/config.yaml; then
         local current_type=$(awk '/^outbound:/{getline; print $2}' /etc/hysteria/config.yaml | tr -d '\r')
         local route_mode_str="未知/自定义"
-        if grep -q "proxy(all)" /etc/hysteria/config.yaml; then
+        if grep -q "outbound(all)" /etc/hysteria/config.yaml || grep -q "proxy(all)" /etc/hysteria/config.yaml; then
             route_mode_str="全局代理"
-        elif grep -q "proxy(suffix:netflix.com)" /etc/hysteria/config.yaml; then
+        elif grep -q "outbound(suffix:netflix.com)" /etc/hysteria/config.yaml || grep -q "proxy(suffix:netflix.com)" /etc/hysteria/config.yaml; then
             route_mode_str="智能分流 (AI+流媒体)"
         fi
         
@@ -1710,14 +1710,13 @@ config_outbound() {
             local acl_block="acl:\n  inline:\n    - reject(169.254.0.0/16)\n    - reject(::1/128)\n    - reject(127.0.0.0/8)\n    - reject(10.0.0.0/8)\n    - reject(172.16.0.0/12)\n    - reject(192.168.0.0/16)\n    - reject(fc00::/7)\n    - reject(fe80::/10)\n"
             
             if [[ "$route_mode" == 1 ]]; then
-                acl_block+="    - proxy(suffix:openai.com)\n    - proxy(suffix:chatgpt.com)\n    - proxy(suffix:anthropic.com)\n    - proxy(suffix:claude.ai)\n    - proxy(suffix:ai.ndai.top)\n    - proxy(suffix:netflix.com)\n    - proxy(suffix:nflxvideo.net)\n    - proxy(suffix:nflxext.com)\n    - proxy(suffix:nflxso.net)\n    - proxy(suffix:disneyplus.com)\n    - proxy(suffix:dssott.com)\n    - proxy(suffix:bamgrid.com)\n    - proxy(suffix:hulu.com)\n    - proxy(suffix:primevideo.com)\n    - proxy(suffix:amazon.video)\n    - proxy(suffix:spotify.com)\n    - direct(all)"
+                acl_block+="    - outbound(suffix:openai.com)\n    - outbound(suffix:chatgpt.com)\n    - outbound(suffix:anthropic.com)\n    - outbound(suffix:claude.ai)\n    - outbound(suffix:ai.ndai.top)\n    - outbound(suffix:netflix.com)\n    - outbound(suffix:nflxvideo.net)\n    - outbound(suffix:nflxext.com)\n    - outbound(suffix:nflxso.net)\n    - outbound(suffix:disneyplus.com)\n    - outbound(suffix:dssott.com)\n    - outbound(suffix:bamgrid.com)\n    - outbound(suffix:hulu.com)\n    - outbound(suffix:primevideo.com)\n    - outbound(suffix:amazon.video)\n    - outbound(suffix:spotify.com)\n    - direct(all)"
             else
-                acl_block+="    - proxy(all)"
+                acl_block+="    - outbound(all)"
             fi
 
             local out_block="outbound:\n"
             if [[ "$out_type" == "socks5" ]]; then
-                # 【优化】单引号转移防 YAML 注入，确保中转代理特殊密码不出错
                 local safe_user=$(echo "$out_user" | sed "s/'/''/g")
                 local safe_pass=$(echo "$out_pass" | sed "s/'/''/g")
                 
@@ -1762,6 +1761,7 @@ EOF
             echo ""
             yellow "  正在重启 Hysteria 2 核心应用配置..."
             svc_stop hysteria-server 2>/dev/null
+            sleep 1
             svc_start hysteria-server
 
             sleep 2
@@ -1779,6 +1779,8 @@ EOF
                 red "  [✘] 致命错误：核心服务启动失败！可能配置文件语法存在冲突。"
                 purple "  正在为您自动回滚到修改前的稳定配置..."
                 mv -f /etc/hysteria/config.yaml.bak /etc/hysteria/config.yaml
+                svc_stop hysteria-server 2>/dev/null
+                sleep 1
                 svc_start hysteria-server
                 green "  [✔] 回滚完成，已恢复原状。"
             fi
@@ -1814,6 +1816,7 @@ EOF
             
             yellow "  正在重启 Hysteria 2 核心..."
             svc_stop hysteria-server 2>/dev/null
+            sleep 1
             svc_start hysteria-server
             sleep 2
             green "  [✔] 重启成功！已安全退回服务器本机 IP 直连输出模式。"
