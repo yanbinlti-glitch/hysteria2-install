@@ -1606,23 +1606,23 @@ config_outbound() {
         fi
     fi
 
-    # 检查当前是否开启了 outbound 及路由模式
-    if grep -q "^outbound:" /etc/hysteria/config.yaml; then
-        local current_type=$(awk '/^outbound:/{getline; print $2}' /etc/hysteria/config.yaml | tr -d '\r')
+    # 检查当前是否开启了 outbounds 及路由模式
+    if grep -q "^outbound" /etc/hysteria/config.yaml; then
+        local current_type=$(awk '/^outbound/,0' /etc/hysteria/config.yaml | grep "type:" | head -n 1 | awk '{print $2}' | tr -d '\r')
         local route_mode_str="未知/自定义"
-        if grep -q "outbound(all)" /etc/hysteria/config.yaml || grep -q "proxy(all)" /etc/hysteria/config.yaml; then
+        if grep -q "proxy(all)" /etc/hysteria/config.yaml; then
             route_mode_str="全局代理"
-        elif grep -q "outbound(suffix:netflix.com)" /etc/hysteria/config.yaml || grep -q "proxy(suffix:netflix.com)" /etc/hysteria/config.yaml; then
+        elif grep -q "proxy(suffix:netflix.com)" /etc/hysteria/config.yaml; then
             route_mode_str="智能分流 (AI+流媒体)"
         fi
         
-        yellow "  当前状态: [已开启] 落地代理模式 (类型: $current_type |路由: $route_mode_str)"
+        yellow "  当前状态: [已开启] 落地代理模式 (类型: ${current_type:-未知} |路由: $route_mode_str)"
         
         local current_addr=""
         if [[ "$current_type" == "socks5" ]]; then
-            current_addr=$(awk '/socks5:/{getline; print $2}' /etc/hysteria/config.yaml | awk '/addr:/{print $2}' | tr -d '\r')
+            current_addr=$(awk '/^outbound/,0' /etc/hysteria/config.yaml | grep "addr:" | head -n 1 | awk '{print $2}' | tr -d '\r')
         elif [[ "$current_type" == "http" ]]; then
-            current_addr=$(awk '/http:/{getline; print $2}' /etc/hysteria/config.yaml | awk '/url:/{print $2}' | tr -d '\r')
+            current_addr=$(awk '/^outbound/,0' /etc/hysteria/config.yaml | grep "url:" | head -n 1 | awk '{print $2}' | tr -d '\r')
         fi
         [[ -n "$current_addr" ]] && green "  当前代理地址: $current_addr"
     else
@@ -1710,20 +1710,21 @@ config_outbound() {
             local acl_block="acl:\n  inline:\n    - reject(169.254.0.0/16)\n    - reject(::1/128)\n    - reject(127.0.0.0/8)\n    - reject(10.0.0.0/8)\n    - reject(172.16.0.0/12)\n    - reject(192.168.0.0/16)\n    - reject(fc00::/7)\n    - reject(fe80::/10)\n"
             
             if [[ "$route_mode" == 1 ]]; then
-                acl_block+="    - outbound(suffix:openai.com)\n    - outbound(suffix:chatgpt.com)\n    - outbound(suffix:anthropic.com)\n    - outbound(suffix:claude.ai)\n    - outbound(suffix:ai.ndai.top)\n    - outbound(suffix:netflix.com)\n    - outbound(suffix:nflxvideo.net)\n    - outbound(suffix:nflxext.com)\n    - outbound(suffix:nflxso.net)\n    - outbound(suffix:disneyplus.com)\n    - outbound(suffix:dssott.com)\n    - outbound(suffix:bamgrid.com)\n    - outbound(suffix:hulu.com)\n    - outbound(suffix:primevideo.com)\n    - outbound(suffix:amazon.video)\n    - outbound(suffix:spotify.com)\n    - direct(all)"
+                acl_block+="    - proxy(suffix:openai.com)\n    - proxy(suffix:chatgpt.com)\n    - proxy(suffix:anthropic.com)\n    - proxy(suffix:claude.ai)\n    - proxy(suffix:ai.ndai.top)\n    - proxy(suffix:netflix.com)\n    - proxy(suffix:nflxvideo.net)\n    - proxy(suffix:nflxext.com)\n    - proxy(suffix:nflxso.net)\n    - proxy(suffix:disneyplus.com)\n    - proxy(suffix:dssott.com)\n    - proxy(suffix:bamgrid.com)\n    - proxy(suffix:hulu.com)\n    - proxy(suffix:primevideo.com)\n    - proxy(suffix:amazon.video)\n    - proxy(suffix:spotify.com)\n    - direct(all)"
             else
-                acl_block+="    - outbound(all)"
+                acl_block+="    - proxy(all)"
             fi
 
-            local out_block="outbound:\n"
+            # 【核心修复区域】修正 yaml 语法，使用 outbounds 列表定义并添加名称代理名称属性
+            local out_block="outbounds:\n  - name: proxy\n"
             if [[ "$out_type" == "socks5" ]]; then
                 local safe_user=$(echo "$out_user" | sed "s/'/''/g")
                 local safe_pass=$(echo "$out_pass" | sed "s/'/''/g")
                 
-                out_block+="  type: socks5\n  socks5:\n    addr: $out_addr\n"
-                [[ -n "$out_user" ]] && out_block+="    username: '${safe_user}'\n    password: '${safe_pass}'\n"
+                out_block+="    type: socks5\n    socks5:\n      addr: $out_addr\n"
+                [[ -n "$out_user" ]] && out_block+="      username: '${safe_user}'\n      password: '${safe_pass}'\n"
             else
-                out_block+="  type: http\n  http:\n    url: $proxy_uri\n"
+                out_block+="    type: http\n    http:\n      url: $proxy_uri\n"
             fi
 
             cp -f /etc/hysteria/config.yaml /etc/hysteria/config.yaml.bak
@@ -1737,7 +1738,7 @@ with open('/etc/hysteria/config.yaml', 'r') as f:
 new_lines = []
 skip = False
 for line in lines:
-    if line.startswith('acl:') or line.startswith('outbound:'):
+    if line.startswith('acl:') or line.startswith('outbounds:') or line.startswith('outbound:'):
         skip = True
         continue
     if skip and line and not line.startswith(' ') and not line.startswith('#'):
@@ -1797,7 +1798,7 @@ with open('/etc/hysteria/config.yaml', 'r') as f:
 new_lines = []
 skip = False
 for line in lines:
-    if line.startswith('acl:') or line.startswith('outbound:'):
+    if line.startswith('acl:') or line.startswith('outbounds:') or line.startswith('outbound:'):
         skip = True
         continue
     if skip and line and not line.startswith(' ') and not line.startswith('#'):
@@ -1825,23 +1826,23 @@ EOF
             echo ""
             print_line
             yellow "  ▶ 正在检查落地代理运行与健康状态..."
-            if ! grep -q "^outbound:" /etc/hysteria/config.yaml; then
+            if ! grep -q "^outbound" /etc/hysteria/config.yaml; then
                 red "  当前未开启落地代理，正在使用本机原生直连。"
             else
-                local current_type=$(awk '/^outbound:/{getline; print $2}' /etc/hysteria/config.yaml | tr -d '\r')
+                local current_type=$(awk '/^outbound/,0' /etc/hysteria/config.yaml | grep "type:" | head -n 1 | awk '{print $2}' | tr -d '\r')
                 local curl_proxy=""
                 
                 if [[ "$current_type" == "socks5" ]]; then
-                    local s_addr=$(awk '/socks5:/{getline; print $2}' /etc/hysteria/config.yaml | awk '/addr:/{print $2}' | tr -d '\r')
-                    local s_user=$(awk '/socks5:/{getline; getline; print $0}' /etc/hysteria/config.yaml | awk '/username:/{print $2}' | tr -d '\r' | tr -d "'")
-                    local s_pass=$(awk '/socks5:/{getline; getline; getline; print $0}' /etc/hysteria/config.yaml | awk '/password:/{print $2}' | tr -d '\r' | tr -d "'")
+                    local s_addr=$(awk '/^outbound/,0' /etc/hysteria/config.yaml | grep "addr:" | head -n 1 | awk '{print $2}' | tr -d '\r')
+                    local s_user=$(awk '/^outbound/,0' /etc/hysteria/config.yaml | grep "username:" | head -n 1 | awk '{print $2}' | tr -d '\r' | tr -d "'")
+                    local s_pass=$(awk '/^outbound/,0' /etc/hysteria/config.yaml | grep "password:" | head -n 1 | awk '{print $2}' | tr -d '\r' | tr -d "'")
                     if [[ -n "$s_user" ]]; then
                         curl_proxy="socks5h://${s_user}:${s_pass}@${s_addr}"
                     else
                         curl_proxy="socks5h://${s_addr}"
                     fi
                 elif [[ "$current_type" == "http" ]]; then
-                    curl_proxy=$(awk '/http:/{getline; print $2}' /etc/hysteria/config.yaml | awk '/url:/{print $2}' | tr -d '\r')
+                    curl_proxy=$(awk '/^outbound/,0' /etc/hysteria/config.yaml | grep "url:" | head -n 1 | awk '{print $2}' | tr -d '\r')
                 fi
 
                 echo ""
