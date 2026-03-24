@@ -860,9 +860,9 @@ class SecureSubHandler(http.server.BaseHTTPRequestHandler):
     sys_version = ""
     timeout = 5 # 新增：单个请求如果 5 秒拉不下来直接掐断，防止占死端口
 
-    # 屏蔽错误日志防刷屏崩溃
+    # 开放订阅访问日志，实时输出客户端拉取情况
     def log_message(self, format, *args):
-        pass
+        print(f"[Sub Server] {self.address_string()} - {format % args}", flush=True)
 
     def handle(self):
         try:
@@ -949,6 +949,8 @@ command_background=true
 command_user="nobody"
 directory="${web_dir}"
 pidfile="/run/hysteria-sub.pid"
+output_log="/var/log/hysteria-sub.log"
+error_log="/var/log/hysteria-sub.log"
 EOF
         chmod +x /etc/init.d/hysteria-sub
         rc-update add hysteria-sub default
@@ -2063,7 +2065,7 @@ show_logs() {
     clear
     echo ""
     print_line
-    green "                 Hysteria 2 核心运行日志查阅               "
+    green "               Hysteria 2 全景实时运行日志查阅             "
     print_line
     echo ""
     
@@ -2072,64 +2074,43 @@ show_logs() {
         sleep 2; return
     fi
 
-    echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}查看最近 100 行日志 (直接输出，方便快速截图和预览)${PLAIN}"
-    echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_PURPLE}全量交互式查阅 (支持上下翻页 / 搜索功能，看完按 q 键退出)${PLAIN}"
+    echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}实时滚屏监控 (包含 节点核心连接 + 订阅拉取记录，按 Ctrl+C 退出)${PLAIN}"
+    echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_PURPLE}全量翻页查阅 (静态查看历史完整原始日志，支持搜索，看完按 q 退出)${PLAIN}"
     echo ""
     echo -en " ${LIGHT_YELLOW} ▶ 请输入选项 [1-2] (默认1): ${PLAIN}"
     read log_choice || log_choice=1
     [[ -z "$log_choice" ]] && log_choice=1
 
-    yellow "  ▶ 正在读取日志并应用智能色彩分析..."
+    yellow "  ▶ 正在抓取全方面原始日志..."
+    yellow "  (包含 Hysteria 核心协议握手、客户端访问以及订阅链接的拉取日志)"
     sleep 1
     echo ""
 
-    # 使用 awk 做实时日志高亮处理
-    local awk_script='
-        /error|ERROR|fatal|FATAL|fail|Failed/ { print "\033[1;31m" $0 "\033[0m"; next }
-        /warn|WARN|warning|WARNING/ { print "\033[1;33m" $0 "\033[0m"; next }
-        /info|INFO/ { print "\033[1;32m" $0 "\033[0m"; next }
-        /debug|DEBUG/ { print "\033[1;36m" $0 "\033[0m"; next }
-        { print "\033[0m" $0 "\033[0m" }
-    '
-
     if [[ $SYSTEM == "Alpine" ]]; then
-        # Alpine OpenRC 日志补丁与读取逻辑
+        # 补丁：确保 Alpine 有日志文件，防止 tail 报错
         if ! grep -q "output_log" /etc/init.d/hysteria-server 2>/dev/null; then
             sed -i '/pidfile/a output_log="/var/log/hysteria.log"\nerror_log="/var/log/hysteria.log"' /etc/init.d/hysteria-server 2>/dev/null
             rc-service hysteria-server restart >/dev/null 2>&1
-            yellow "  [系统提示] 检测到您使用的是 Alpine 系统，已自动为您配置 OpenRC 日志输出规则并热重启了服务！"
-            yellow "  [说明] 之前的日志可能已被系统丢弃，从现在起产生的新日志将正常显示。"
-            echo ""
-            sleep 2
         fi
         
-        if [[ ! -f /var/log/hysteria.log ]]; then
-            touch /var/log/hysteria.log
-        fi
+        touch /var/log/hysteria.log 2>/dev/null
+        touch /var/log/hysteria-sub.log 2>/dev/null
 
         if [[ "$log_choice" == "2" ]]; then
-            cat /var/log/hysteria.log | awk "$awk_script" | less -R
+            # 静态合并查看
+            cat /var/log/hysteria.log /var/log/hysteria-sub.log | less -R
         else
-            tail -n 100 /var/log/hysteria.log | awk "$awk_script"
-            echo ""
-            print_line
-            yellow "  [阅读指南] 红色代表报错(ERROR) | 黄色代表警告(WARN) | 绿色代表信息(INFO)"
-            echo ""
-            echo -en " ${LIGHT_YELLOW} ▶ 阅毕，按回车键返回主菜单... ${PLAIN}"
-            read temp
+            # 实时双线监控（实时追踪 tail -f）
+            tail -n 50 -f /var/log/hysteria.log /var/log/hysteria-sub.log
         fi
     else
-        # Systemd 环境逻辑
+        # Systemd 环境逻辑 (Ubuntu/Debian/CentOS 等)
         if [[ "$log_choice" == "2" ]]; then
-            journalctl -u hysteria-server --no-pager | awk "$awk_script" | less -R
+            # 使用 journalctl 同时导出 server 和 sub 服务的全量原始日志
+            journalctl -u hysteria-server -u hysteria-sub --no-pager | less -R
         else
-            journalctl -u hysteria-server -n 100 --no-pager | awk "$awk_script"
-            echo ""
-            print_line
-            yellow "  [阅读指南] 红色代表报错(ERROR) | 黄色代表警告(WARN) | 绿色代表信息(INFO)"
-            echo ""
-            echo -en " ${LIGHT_YELLOW} ▶ 阅毕，按回车键返回主菜单... ${PLAIN}"
-            read temp
+            # 实时流式输出 (-f 持续监听)
+            journalctl -u hysteria-server -u hysteria-sub -n 50 -f
         fi
     fi
 }
