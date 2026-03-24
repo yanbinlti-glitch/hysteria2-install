@@ -694,6 +694,7 @@ inst_other_configs() {
 # =================================================================
 clean_env() {
     local mode="$1"
+    local core_mode="$2"
     
     if [[ -f /etc/hysteria/.firewall_state ]]; then
         while IFS=: read -r c_proto c_port c_endport; do
@@ -741,7 +742,10 @@ clean_env() {
     fi
     save_iptables
 
-    rm -rf /usr/local/bin/hysteria /etc/hysteria /var/www/hysteria
+    rm -rf /etc/hysteria /var/www/hysteria
+    if [[ "$core_mode" != "keep_core" ]]; then
+        rm -f /usr/local/bin/hysteria
+    fi
     
     if [[ "$mode" == "all" ]]; then
         local h_domain=$(cat /root/ca.log 2>/dev/null | tr -d '\r')
@@ -958,11 +962,11 @@ EOF
 }
 
 insthysteria() {
-    if [[ -f "/etc/hysteria/config.yaml" || -f "/usr/local/bin/hysteria" ]]; then
+    if [[ -f "/etc/hysteria/config.yaml" ]]; then
         echo ""
-        yellow "  检测到旧版本配置，正在清理旧规则与文件，为您重新生成..."
-        clean_env "keep_certs"
-        green "  旧文件清理完成，准备重新部署！"
+        red "  [提示] 已经安装节点，请使用 [2] 卸载节点后再进行重新安装！"
+        sleep 2
+        return
     fi
     
     check_env
@@ -1144,26 +1148,46 @@ EOF
     sleep 3
 }
 
-unsthysteria() {
+remove_node() {
     echo ""
     echo -en " ${LIGHT_YELLOW} ▶ 是否彻底删除已申请的域名证书及 Acme.sh 环境？(频繁删除会导致 API 封锁 7 天) (y/n) [默认: n]: ${PLAIN}"
     read rm_cert || exit 1
     [[ -z "$rm_cert" ]] && rm_cert="n"
 
-    yellow "  正在安全地清理系统网络、防火墙规则，并卸载相关文件..."
+    yellow "  正在安全地清理系统网络、防火墙规则，并卸载节点配置..."
     
     if [[ "$rm_cert" == "y" || "$rm_cert" == "Y" ]]; then
-        clean_env "all"
+        clean_env "all" "keep_core"
     else
-        clean_env "keep"
+        clean_env "keep" "keep_core"
     fi
-    
-    rm -f /usr/bin/hy2
 
     echo ""
-    green "  Hysteria 2 服务及相关文件、端口规则已被彻底清理！"
+    green "  Hysteria 2 节点配置、服务及相关端口规则已被彻底清理！(已保留核心与快捷指令)"
     sleep 2
-    exit 0
+    return
+}
+
+global_uninstall() {
+    echo ""
+    red "  [警告] 这将彻底删除 Hysteria2 核心、所有节点配置、Acme.sh 证书环境及快捷命令！"
+    echo -en " ${LIGHT_YELLOW} ▶ 是否确认全局卸载并回归没装脚本的状态？(y/n) [默认: n]: ${PLAIN}"
+    read confirm || exit 1
+    [[ -z "$confirm" ]] && confirm="n"
+    
+    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+        yellow "  正在全局安全卸载清理中..."
+        clean_env "all" "remove_core"
+        rm -f /usr/bin/hy2
+        rm -f /root/.hy2_sub_port /root/.hy2_sub_uuid
+        echo ""
+        green "  全局卸载完成！系统已完全恢复至未安装脚本前的状态。"
+        sleep 2
+        exit 0
+    else
+        yellow "  已取消全局卸载。"
+        sleep 2
+    fi
 }
 
 # =================================================================
@@ -2271,7 +2295,8 @@ menu() {
     yellow " 脚本快捷方式：hy2 (已自动配置，下次可在终端直接输入 hy2 启动)"
     red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
     echo -e "  ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}安装部署 Hysteria 2${PLAIN}"
-    echo -e "  ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_RED}彻底卸载 Hysteria 2${PLAIN}"
+    echo -e "  ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_RED}卸载节点 (保留核心与快捷命令)${PLAIN}"
+    echo -e "  ${LIGHT_GREEN}[11]${PLAIN} ${LIGHT_RED}全局卸载脚本 (回归没装脚本的状态)${PLAIN}"
     echo "----------------------------------------------------------------------------------"
     echo -e "  ${LIGHT_GREEN}[3]${PLAIN} ${LIGHT_YELLOW}启动 / 停止 / 重启服务${PLAIN}"
     echo -e "  ${LIGHT_GREEN}[4]${PLAIN} ${LIGHT_PURPLE}查看 / 修改 配置文件${PLAIN}"
@@ -2286,11 +2311,11 @@ menu() {
     echo -e "  ${LIGHT_GREEN}[0]${PLAIN} ${LIGHT_RED}退出脚本${PLAIN}"
     red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
     echo ""
-    echo -en " ${LIGHT_YELLOW} ▶ 请输入选项 [0-10]: ${PLAIN}"
+    echo -en " ${LIGHT_YELLOW} ▶ 请输入选项 [0-11]: ${PLAIN}"
     read menuInput || exit 1
     case $menuInput in
         1 ) insthysteria ;;
-        2 ) unsthysteria ;;
+        2 ) remove_node ;;
         3 ) hysteriaswitch ;;
         4 ) edit_config ;;
         5 ) config_outbound ;;
@@ -2299,6 +2324,7 @@ menu() {
         8 ) enable_bbr ;;
         9 ) check_cert ;;
         10 ) server_status_check ;;
+        11 ) global_uninstall ;;
         0 ) exit 0 ;;
         * ) red "  输入无效"; sleep 1 ;;
     esac
