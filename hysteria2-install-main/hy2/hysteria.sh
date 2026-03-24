@@ -1034,6 +1034,8 @@ command="/usr/local/bin/hysteria"
 command_args="server -c /etc/hysteria/config.yaml"
 command_background=true
 pidfile="/run/hysteria-server.pid"
+output_log="/var/log/hysteria.log"
+error_log="/var/log/hysteria.log"
 rc_ulimit="-n 524288"
 EOF
         chmod +x /etc/init.d/hysteria-server
@@ -2070,14 +2072,6 @@ show_logs() {
         sleep 2; return
     fi
 
-    if [[ $SYSTEM == "Alpine" ]]; then
-        yellow "  [提示] Alpine 系统默认不使用 systemd，日志输出依赖系统配置 (如 /var/log/messages)。"
-        echo ""
-        echo -en " ${LIGHT_YELLOW} ▶ 按回车键返回主菜单... ${PLAIN}"
-        read temp
-        return
-    fi
-
     echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}查看最近 100 行日志 (直接输出，方便快速截图和预览)${PLAIN}"
     echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_PURPLE}全量交互式查阅 (支持上下翻页 / 搜索功能，看完按 q 键退出)${PLAIN}"
     echo ""
@@ -2098,17 +2092,45 @@ show_logs() {
         { print "\033[0m" $0 "\033[0m" }
     '
 
-    if [[ "$log_choice" == "2" ]]; then
-        # less -R 参数可以在翻页交互时完美保留终端彩色字符
-        journalctl -u hysteria-server --no-pager | awk "$awk_script" | less -R
+    if [[ $SYSTEM == "Alpine" ]]; then
+        # Alpine OpenRC 日志补丁与读取逻辑
+        if ! grep -q "output_log" /etc/init.d/hysteria-server 2>/dev/null; then
+            sed -i '/pidfile/a output_log="/var/log/hysteria.log"\nerror_log="/var/log/hysteria.log"' /etc/init.d/hysteria-server 2>/dev/null
+            rc-service hysteria-server restart >/dev/null 2>&1
+            yellow "  [系统提示] 检测到您使用的是 Alpine 系统，已自动为您配置 OpenRC 日志输出规则并热重启了服务！"
+            yellow "  [说明] 之前的日志可能已被系统丢弃，从现在起产生的新日志将正常显示。"
+            echo ""
+            sleep 2
+        fi
+        
+        if [[ ! -f /var/log/hysteria.log ]]; then
+            touch /var/log/hysteria.log
+        fi
+
+        if [[ "$log_choice" == "2" ]]; then
+            cat /var/log/hysteria.log | awk "$awk_script" | less -R
+        else
+            tail -n 100 /var/log/hysteria.log | awk "$awk_script"
+            echo ""
+            print_line
+            yellow "  [阅读指南] 红色代表报错(ERROR) | 黄色代表警告(WARN) | 绿色代表信息(INFO)"
+            echo ""
+            echo -en " ${LIGHT_YELLOW} ▶ 阅毕，按回车键返回主菜单... ${PLAIN}"
+            read temp
+        fi
     else
-        journalctl -u hysteria-server -n 100 --no-pager | awk "$awk_script"
-        echo ""
-        print_line
-        yellow "  [阅读指南] 红色代表报错(ERROR) | 黄色代表警告(WARN) | 绿色代表信息(INFO)"
-        echo ""
-        echo -en " ${LIGHT_YELLOW} ▶ 阅毕，按回车键返回主菜单... ${PLAIN}"
-        read temp
+        # Systemd 环境逻辑
+        if [[ "$log_choice" == "2" ]]; then
+            journalctl -u hysteria-server --no-pager | awk "$awk_script" | less -R
+        else
+            journalctl -u hysteria-server -n 100 --no-pager | awk "$awk_script"
+            echo ""
+            print_line
+            yellow "  [阅读指南] 红色代表报错(ERROR) | 黄色代表警告(WARN) | 绿色代表信息(INFO)"
+            echo ""
+            echo -en " ${LIGHT_YELLOW} ▶ 阅毕，按回车键返回主菜单... ${PLAIN}"
+            read temp
+        fi
     fi
 }
 
