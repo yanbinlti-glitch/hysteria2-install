@@ -493,8 +493,23 @@ inst_port() {
 inst_sub_port(){
     echo ""
     print_line
-    echo -en " ${LIGHT_YELLOW} ▶ 设置智能订阅服务端口 [1024-65535] (回车随机): ${PLAIN}"
-    read sub_port_input || exit 1
+    local history_port=""
+    [[ -f /root/.hy2_sub_port ]] && history_port=$(cat /root/.hy2_sub_port)
+
+    if [[ -n "$history_port" ]]; then
+        echo -en " ${LIGHT_YELLOW} ▶ 检测到历史订阅端口 [${history_port}]，是否沿用以保持订阅链接不变？(y/n) [默认: y]: ${PLAIN}"
+        read use_hist || exit 1
+        [[ -z "$use_hist" ]] && use_hist="y"
+        if [[ "$use_hist" == "y" || "$use_hist" == "Y" ]]; then
+            sub_port_input=$history_port
+        else
+            echo -en " ${LIGHT_YELLOW} ▶ 重新设置订阅服务端口 [1024-65535]: ${PLAIN}"
+            read sub_port_input || exit 1
+        fi
+    else
+        echo -en " ${LIGHT_YELLOW} ▶ 设置智能订阅服务端口 [1024-65535] (回车随机): ${PLAIN}"
+        read sub_port_input || exit 1
+    fi
     [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 10000-30000 -n 1)
     
     # 【修复体验瑕疵】增加对主端口的校验判断，防止订阅端口和主端口重叠导致死锁
@@ -519,6 +534,9 @@ inst_sub_port(){
     done
     green " 订阅端口已设置为: $sub_port_input"
     open_port $sub_port_input "tcp"
+    
+    # 将最终确定的端口保存到 root 目录防丢失
+    echo "$sub_port_input" > /root/.hy2_sub_port
     
     mkdir -p /etc/hysteria
     echo "$sub_port_input" > /etc/hysteria/sub_port.txt
@@ -732,15 +750,25 @@ generate_client_configs() {
     local web_dir="/var/www/hysteria"
     mkdir -p "$web_dir"
 
-    local sub_uuid=$(cat /etc/hysteria/sub_path.txt 2>/dev/null)
-    [[ -z "$sub_uuid" ]] && sub_uuid=$(gen_random_str 16)
-    mkdir -p "$web_dir/$sub_uuid"
+    # 【升级】使用服务器 IP 生成固定的特征码，确保无论如何重装，路径永远不变
+    local sub_uuid=""
+    if [[ -f /root/.hy2_sub_uuid ]]; then
+        sub_uuid=$(cat /root/.hy2_sub_uuid)
+    else
+        sub_uuid=$(echo "${ip}-Hysteria2-Sub" | md5sum | head -c 16)
+        echo "$sub_uuid" > /root/.hy2_sub_uuid
+    fi
+    # 写入常规配置目录供查询功能调用
     echo "$sub_uuid" > /etc/hysteria/sub_path.txt
+    
+    mkdir -p "$web_dir/$sub_uuid"
 
     local url="hy2://$s_pwd@$uri_ip:$primary_port/?insecure=${is_insecure_url}&sni=$c_domain${mport_param}${obfs_param}#${safe_node_name}"
     echo "$url" > "$web_dir/$sub_uuid/url.txt"
     
     printf "%s" "$url" | base64 -w 0 2>/dev/null > "$web_dir/$sub_uuid/sub_b64.txt" || printf "%s" "$url" | base64 | tr -d '\r\n' > "$web_dir/$sub_uuid/sub_b64.txt"
+
+    local sub_port=$(cat /etc/hysteria/sub_port.txt)
 
     # 原子化写入，防止并发拉取订阅时遇到空文件
     cat << EOF > "$web_dir/$sub_uuid/clash.tmp"
@@ -775,13 +803,20 @@ proxy-groups:
       - DIRECT
 
 rules:
+  # 【防死锁核心】强制服务器真实 IP 与订阅端口走本地直连网络，确保更新订阅永不超时
+  - IP-CIDR,$yaml_json_ip/32,DIRECT,no-resolve
+$([[ "$yaml_json_ip" == *":"* ]] && echo "  - IP-CIDR6,$yaml_json_ip/128,DIRECT,no-resolve")
+  - DST-PORT,$sub_port,DIRECT
+  
+  # 局域网与国内直连
   - GEOIP,LAN,DIRECT,no-resolve
   - GEOIP,CN,DIRECT
+  
+  # 其余流量走代理
   - MATCH,节点选择
 EOF
     mv -f "$web_dir/$sub_uuid/clash.tmp" "$web_dir/$sub_uuid/clash-meta-sub.yaml"
 
-    local sub_port=$(cat /etc/hysteria/sub_port.txt)
     local sub_cert_dir="$web_dir/certs"
     mkdir -p "$sub_cert_dir"
     
@@ -811,6 +846,7 @@ WEB_DIR = "$web_dir"
 class SecureSubHandler(http.server.BaseHTTPRequestHandler):
     server_version = "nginx/1.24.0"
     sys_version = ""
+    timeout = 5 # 新增：单个请求如果 5 秒拉不下来直接掐断，防止占死端口
 
     # 屏蔽错误日志防刷屏崩溃
     def log_message(self, format, *args):
@@ -2028,11 +2064,12 @@ menu() {
     echo -e "  ${LIGHT_GREEN}[7]${PLAIN} ${LIGHT_YELLOW}查看 客户端连接 与 流量统计${PLAIN}"
     echo -e "  ${LIGHT_GREEN}[8]${PLAIN} ${LIGHT_PURPLE}开启 BBR 及 UDP 极限并发加速 (强烈推荐)${PLAIN}"
     echo -e "  ${LIGHT_GREEN}[9]${PLAIN} ${LIGHT_GREEN}检查 证书安装状态与详细信息${PLAIN}"
+    echo -e "  ${LIGHT_GREEN}[10]${PLAIN} ${LIGHT_YELLOW}刷新并强制重新生成订阅节点 (极速更新)${PLAIN}"
     echo "----------------------------------------------------------------------------------"
     echo -e "  ${LIGHT_GREEN}[0]${PLAIN} ${LIGHT_RED}退出脚本${PLAIN}"
     red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
     echo ""
-    echo -en " ${LIGHT_YELLOW} ▶ 请输入选项 [0-9]: ${PLAIN}"
+    echo -en " ${LIGHT_YELLOW} ▶ 请输入选项 [0-10]: ${PLAIN}"
     read menuInput || exit 1
     case $menuInput in
         1 ) insthysteria ;;
@@ -2044,6 +2081,13 @@ menu() {
         7 ) check_traffic ;;
         8 ) enable_bbr ;;
         9 ) check_cert ;;
+        10 ) 
+            echo ""
+            yellow "  正在为您极速重新生成节点与订阅配置..."
+            generate_client_configs
+            green "  [✔] 生成完毕！现在去客户端更新订阅即可。"
+            sleep 2
+            ;;
         0 ) exit 0 ;;
         * ) red "  输入无效"; sleep 1 ;;
     esac
