@@ -1010,10 +1010,7 @@ insthysteria() {
         *) red " [错误] 不支持的架构: $arch" && exit 1 ;;
     esac
     
-    # 下载官方的 SHA256 校验文件
-    wget --timeout=10 --tries=3 -q -O /tmp/hysteria.sha256 "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}.sha256"
-    
-    # 更换为更稳定的 fallback 下载源
+    wget --timeout=10 --tries=3 -q -O /tmp/hysteria.sha256 "https://ghfast.top/https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}.sha256"
     wget --timeout=10 --tries=3 -N -v -O /usr/local/bin/hysteria "https://ghfast.top/https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}"
     
     # SHA256 严格校验防范供应链挂马
@@ -2073,10 +2070,73 @@ EOF
     read temp
 }
 
+show_logs() {
+    clear
+    echo ""
+    print_line
+    green "                 Hysteria 2 核心运行日志查阅               "
+    print_line
+    echo ""
+    
+    if [[ ! -f /etc/hysteria/config.yaml ]]; then
+        red "  [✘] 未检测到 Hysteria 2 配置文件，请先安装服务！"
+        sleep 2; return
+    fi
+
+    if [[ $SYSTEM == "Alpine" ]]; then
+        yellow "  [提示] Alpine 系统默认不使用 systemd，日志输出依赖系统配置 (如 /var/log/messages)。"
+        echo ""
+        echo -en " ${LIGHT_YELLOW} ▶ 按回车键返回主菜单... ${PLAIN}"
+        read temp
+        return
+    fi
+
+    echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}查看最近 100 行日志 (直接输出，方便快速截图和预览)${PLAIN}"
+    echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_PURPLE}全量交互式查阅 (支持上下翻页 / 搜索功能，看完按 q 键退出)${PLAIN}"
+    echo ""
+    echo -en " ${LIGHT_YELLOW} ▶ 请输入选项 [1-2] (默认1): ${PLAIN}"
+    read log_choice || log_choice=1
+    [[ -z "$log_choice" ]] && log_choice=1
+
+    yellow "  ▶ 正在读取日志并应用智能色彩分析..."
+    sleep 1
+    echo ""
+
+    # 使用 awk 做实时日志高亮处理
+    local awk_script='
+        /error|ERROR|fatal|FATAL|fail|Failed/ { print "\033[1;31m" $0 "\033[0m"; next }
+        /warn|WARN|warning|WARNING/ { print "\033[1;33m" $0 "\033[0m"; next }
+        /info|INFO/ { print "\033[1;32m" $0 "\033[0m"; next }
+        /debug|DEBUG/ { print "\033[1;36m" $0 "\033[0m"; next }
+        { print "\033[0m" $0 "\033[0m" }
+    '
+
+    if [[ "$log_choice" == "2" ]]; then
+        # less -R 参数可以在翻页交互时完美保留终端彩色字符
+        journalctl -u hysteria-server --no-pager | awk "$awk_script" | less -R
+    else
+        journalctl -u hysteria-server -n 100 --no-pager | awk "$awk_script"
+        echo ""
+        print_line
+        yellow "  [阅读指南] 红色代表报错(ERROR) | 黄色代表警告(WARN) | 绿色代表信息(INFO)"
+        echo ""
+        echo -en " ${LIGHT_YELLOW} ▶ 阅毕，按回车键返回主菜单... ${PLAIN}"
+        read temp
+    fi
+}
+
 # =================================================================
 #  8. 主菜单控制
 # =================================================================
 menu() {
+    # 增加状态判定
+    local status_ui="${LIGHT_RED}● 未运行 / 异常${PLAIN}"
+    if [[ $SYSTEM == "Alpine" ]]; then
+        rc-service hysteria-server status 2>/dev/null | grep -q 'started' && status_ui="${LIGHT_GREEN}● 运行中 (Active)${PLAIN}"
+    else
+        systemctl is-active --quiet hysteria-server 2>/dev/null && status_ui="${LIGHT_GREEN}● 运行中 (Active)${PLAIN}"
+    fi
+
     clear
     green "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
     echo -e "${LIGHT_GREEN}  ██████╗  ██╗   ██╗ ██████╗  ██╗       █████╗ ${PLAIN}"
@@ -2087,7 +2147,7 @@ menu() {
     echo -e "${LIGHT_GREEN}  ╚═════╝   ╚══════╝  ╚═════╝ ╚══════╝ ╚═╝  ╚═╝${PLAIN}"
     green "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
     green " 项目名称 ：Hysteria 2 一键部署与管理脚本 (单人旗舰加固版)"
-    purple " 项目地址 ：哆啦的Github库 https://github.com/yanbinlti-glitch"
+    echo -e " ${LIGHT_PURPLE}项目地址 ：哆啦的Github库 https://github.com/yanbinlti-glitch  |  节点状态: ${status_ui}"
     green "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
     yellow " 脚本快捷方式：hy2 (已自动配置，下次可在终端直接输入 hy2 启动)"
     red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
@@ -2102,7 +2162,7 @@ menu() {
     echo -e "  ${LIGHT_GREEN}[7]${PLAIN} ${LIGHT_YELLOW}查看 客户端连接 与 流量统计${PLAIN}"
     echo -e "  ${LIGHT_GREEN}[8]${PLAIN} ${LIGHT_PURPLE}开启 BBR 及 UDP 极限并发加速 (强烈推荐)${PLAIN}"
     echo -e "  ${LIGHT_GREEN}[9]${PLAIN} ${LIGHT_GREEN}检查 证书安装状态与详细信息${PLAIN}"
-    echo -e "  ${LIGHT_GREEN}[10]${PLAIN} ${LIGHT_YELLOW}刷新并强制重新生成订阅节点 (极速更新)${PLAIN}"
+    echo -e "  ${LIGHT_GREEN}[10]${PLAIN} ${LIGHT_YELLOW}查看 节点运行日志 (全量排错 / 智能色彩高亮)${PLAIN}"
     echo "----------------------------------------------------------------------------------"
     echo -e "  ${LIGHT_GREEN}[0]${PLAIN} ${LIGHT_RED}退出脚本${PLAIN}"
     red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
@@ -2119,13 +2179,7 @@ menu() {
         7 ) check_traffic ;;
         8 ) enable_bbr ;;
         9 ) check_cert ;;
-        10 ) 
-            echo ""
-            yellow "  正在为您极速重新生成节点与订阅配置..."
-            generate_client_configs
-            green "  [✔] 生成完毕！现在去客户端更新订阅即可。"
-            sleep 2
-            ;;
+        10 ) show_logs ;;
         0 ) exit 0 ;;
         * ) red "  输入无效"; sleep 1 ;;
     esac
