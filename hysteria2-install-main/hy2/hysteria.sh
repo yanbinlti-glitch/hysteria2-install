@@ -26,7 +26,6 @@ print_line() {
     green " ──────────────────────────────────────────────────────────"
 }
 
-# 捕获 Ctrl+C 中断，防止进程和文件残留
 trap 'echo -e "\n\n ${LIGHT_RED}[警告] 检测到强行中断，脚本已安全退出。${PLAIN}"; exit 1' INT TERM
 
 # =================================================================
@@ -34,7 +33,6 @@ trap 'echo -e "\n\n ${LIGHT_RED}[警告] 检测到强行中断，脚本已安全
 # =================================================================
 [[ $EUID -ne 0 ]] && red " [错误] 请在 root 用户下运行此脚本！" && exit 1
 
-# 安全提取脚本路径
 SCRIPT_PATH=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
 if [[ -f "$SCRIPT_PATH" && "$(head -n 1 "$SCRIPT_PATH" 2>/dev/null)" == "#!/bin/bash" ]]; then
     if [[ "$SCRIPT_PATH" != "/usr/bin/hy2" ]]; then
@@ -69,7 +67,13 @@ if [[ -z $(type -P curl) ]]; then
     $PKG_INSTALL curl || { echo ""; red " [错误] curl 安装失败！请检查网络或系统源。"; exit 1; }
 fi
 
+PUBLIC_IP=""
 realip() {
+    # 修复：增加 IP 缓存机制，防止频繁请求外部 API 导致限流封锁
+    if [[ -n "$PUBLIC_IP" && "$PUBLIC_IP" != *.* && "$PUBLIC_IP" != *:* ]]; then
+        ip="$PUBLIC_IP"
+        return
+    fi
     ip=""
     if ip -4 addr show scope global 2>/dev/null | grep -q 'inet '; then
         ip=$(curl -s4m3 api.ipify.org -k || curl -s4m3 ifconfig.me -k || curl -s4m3 ip.sb -k)
@@ -77,12 +81,12 @@ realip() {
     if [[ -z "$ip" ]]; then
         ip=$(curl -s6m3 api64.ipify.org -k || curl -s6m3 ifconfig.me -k || curl -s6m3 ip.sb -k)
     fi
-    
     if [[ "$ip" != *.* && "$ip" != *:* ]]; then
         echo ""
         red " [错误] 无法获取本机的公网 IP，请检查 VPS 的网络连接或 DNS 设置！"
         exit 1
     fi
+    PUBLIC_IP="$ip"
 }
 
 gen_random_str() {
@@ -97,6 +101,15 @@ svc_start()   { if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" start; else s
 svc_stop()    { if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" stop; else systemctl stop "$1"; fi; }
 svc_enable()  { if [[ $SYSTEM == "Alpine" ]]; then rc-update add "$1" default; else systemctl enable "$1"; fi; }
 svc_disable() { if [[ $SYSTEM == "Alpine" ]]; then rc-update del "$1" default; else systemctl disable "$1"; fi; }
+
+# 修复：统合守护进程状态检查函数，精简冗余代码
+is_svc_active() {
+    if [[ $SYSTEM == "Alpine" ]]; then
+        rc-service "$1" status 2>/dev/null | grep -q 'started'
+    else
+        systemctl is-active --quiet "$1" 2>/dev/null
+    fi
+}
 
 save_iptables() {
     if [[ $SYSTEM == "Alpine" ]]; then
@@ -140,8 +153,15 @@ close_port() {
     elif command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
         ufw delete allow $port/$proto 2>/dev/null
     else
-        while iptables -D INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null; do :; done
-        while ip6tables -D INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null; do :; done
+        # 修复：添加最大清理次数限制，防止特殊内核环境下的死循环
+        local count=0
+        while iptables -D INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null; do
+            count=$((count+1)); [[ $count -ge 15 ]] && break
+        done
+        count=0
+        while ip6tables -D INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null; do
+            count=$((count+1)); [[ $count -ge 15 ]] && break
+        done
         save_iptables
     fi
 }
@@ -153,7 +173,7 @@ check_env() {
     clear
     echo ""
     print_line
-    green "                   系统依赖与环境检查                      "
+    green "                    系统依赖与环境检查                      "
     print_line
     echo ""
     green "  当前操作系统: $SYSTEM"
@@ -323,11 +343,15 @@ inst_cert() {
             }
 
             local dns_api=""
+            local acme_cmd_prefix=""
+            
+            # 修复：确保敏感的 Token 环境变量在执行 acme.sh 时绝对生效 (防御 sudo 环境丢失)
             if [[ "$dns_provider" == 1 ]]; then
                 echo -en " ${LIGHT_YELLOW} ▶ 请输入 Cloudflare API Token: ${PLAIN}"
                 read cf_token || exit 1
                 export CF_Token="$(echo "$cf_token" | tr -d '\r' | tr -d ' ')"
                 dns_api="dns_cf"
+                acme_cmd_prefix="CF_Token=\"$CF_Token\""
                 install_acme "admin@${domain}"
             elif [[ "$dns_provider" == 2 ]]; then
                 echo -en " ${LIGHT_YELLOW} ▶ 请输入阿里云 AccessKey ID: ${PLAIN}"
@@ -337,6 +361,7 @@ inst_cert() {
                 export Ali_Key="$(echo "$ali_key" | tr -d '\r' | tr -d ' ')"
                 export Ali_Secret="$(echo "$ali_secret" | tr -d '\r' | tr -d ' ')"
                 dns_api="dns_ali"
+                acme_cmd_prefix="Ali_Key=\"$Ali_Key\" Ali_Secret=\"$Ali_Secret\""
                 install_acme "admin@${domain}"
             elif [[ "$dns_provider" == 3 ]]; then
                 echo -en " ${LIGHT_YELLOW} ▶ 请输入腾讯云/DNSPod ID: ${PLAIN}"
@@ -346,6 +371,7 @@ inst_cert() {
                 export DP_Id="$(echo "$dp_id" | tr -d '\r' | tr -d ' ')"
                 export DP_Key="$(echo "$dp_key" | tr -d '\r' | tr -d ' ')"
                 dns_api="dns_dp"
+                acme_cmd_prefix="DP_Id=\"$DP_Id\" DP_Key=\"$DP_Key\""
                 install_acme "admin@${domain}"
             else
                 red " [错误] 无效选项！" && exit 1
@@ -356,7 +382,7 @@ inst_cert() {
             rm -f /root/cert.crt /root/private.key /root/ca.log
 
             yellow " 正在通过 DNS API 验证所有权，请留意下方执行日志 (约1-3分钟)..."
-            bash /root/.acme.sh/acme.sh --issue --dns "$dns_api" -d "${domain}" -k ec-256 --dnssleep 20
+            eval "$acme_cmd_prefix bash /root/.acme.sh/acme.sh --issue --dns \"$dns_api\" -d \"${domain}\" -k ec-256 --dnssleep 20"
             mkdir -p /var/www/hysteria/certs
 
             local sys_cmd="/bin/systemctl"
@@ -553,7 +579,8 @@ inst_other_configs() {
     yellow "  订阅链接 UUID 设置"
     local current_uuid=""
     if [[ -f /root/.hy2_sub_uuid ]]; then
-        current_uuid=$(cat /root/.hy2_sub_uuid)
+        # 修复：确保读取出的老版 UUID 没有引入特殊危险字符
+        current_uuid=$(cat /root/.hy2_sub_uuid | tr -d '\r' | LC_ALL=C tr -dc 'a-zA-Z0-9')
     else
         current_uuid=$(echo "${ip}-Hysteria2-Sub" | md5sum | head -c 16)
     fi
@@ -574,9 +601,25 @@ inst_other_configs() {
     green " 连接密码为: $auth_pwd"
 
     echo ""
-    echo -en " ${LIGHT_YELLOW} ▶ 伪装网站地址 (不带 https://) [回车默认 www.bing.com]: ${PLAIN}"
-    read proxysite || exit 1
-    [[ -z $proxysite ]] && proxysite="www.bing.com"
+    # 修复：为伪装站点提供高质量备选项，增强安全与抗封锁能力
+    yellow " ▶ 伪装网站地址选择 (建议使用大型通用网站以防 SNI 阻断)"
+    echo -e "   ${LIGHT_GREEN}[1]${PLAIN} www.bing.com (推荐, 默认)"
+    echo -e "   ${LIGHT_GREEN}[2]${PLAIN} www.apple.com"
+    echo -e "   ${LIGHT_GREEN}[3]${PLAIN} www.microsoft.com"
+    echo -e "   ${LIGHT_GREEN}[4]${PLAIN} 自定义输入"
+    echo -en " ${LIGHT_YELLOW} ▶ 请输入选项 [1-4] (默认1): ${PLAIN}"
+    read proxy_choice || exit 1
+    case $proxy_choice in
+        2) proxysite="www.apple.com" ;;
+        3) proxysite="www.microsoft.com" ;;
+        4)
+            echo -en " ${LIGHT_YELLOW} ▶ 请输入伪装网站地址 (不带 https://): ${PLAIN}"
+            read proxysite || exit 1
+            [[ -z $proxysite ]] && proxysite="www.bing.com"
+            ;;
+        *) proxysite="www.bing.com" ;;
+    esac
+    green " 已设置伪装网站为: $proxysite"
 
     echo ""
     echo -en " ${LIGHT_YELLOW} ▶ 节点显示名称 [回车默认 Hysteria2_Node]: ${PLAIN}"
@@ -661,12 +704,17 @@ clean_env() {
     if [[ -f /etc/hysteria/.firewall_state ]]; then
         while IFS=: read -r c_proto c_port c_endport; do
             if [[ -n "$c_endport" ]]; then
-                while iptables -D INPUT -p "$c_proto" --dport "$c_port:$c_endport" -j ACCEPT 2>/dev/null; do :; done
-                while ip6tables -D INPUT -p "$c_proto" --dport "$c_port:$c_endport" -j ACCEPT 2>/dev/null; do :; done
+                # 修复：清理时同样引入次数上限防御死循环
+                local count=0
+                while iptables -D INPUT -p "$c_proto" --dport "$c_port:$c_endport" -j ACCEPT 2>/dev/null; do count=$((count+1)); [[ $count -ge 15 ]] && break; done
+                count=0
+                while ip6tables -D INPUT -p "$c_proto" --dport "$c_port:$c_endport" -j ACCEPT 2>/dev/null; do count=$((count+1)); [[ $count -ge 15 ]] && break; done
                 local m_port=$(grep -E "^[[:space:]]*listen:" /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ' | tr -d '\r')
                 if [[ -n "$m_port" ]]; then
-                    while iptables -t nat -D PREROUTING -p udp --dport "$c_port:$c_endport" -j REDIRECT --to-ports $m_port 2>/dev/null; do :; done
-                    while ip6tables -t nat -D PREROUTING -p udp --dport "$c_port:$c_endport" -j REDIRECT --to-ports $m_port 2>/dev/null; do :; done
+                    count=0
+                    while iptables -t nat -D PREROUTING -p udp --dport "$c_port:$c_endport" -j REDIRECT --to-ports $m_port 2>/dev/null; do count=$((count+1)); [[ $count -ge 15 ]] && break; done
+                    count=0
+                    while ip6tables -t nat -D PREROUTING -p udp --dport "$c_port:$c_endport" -j REDIRECT --to-ports $m_port 2>/dev/null; do count=$((count+1)); [[ $count -ge 15 ]] && break; done
                     if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
                         firewall-cmd --zone=public --remove-forward-port=port=$c_port-$c_endport:proto=udp:toport=$m_port --permanent 2>/dev/null
                         firewall-cmd --reload 2>/dev/null
@@ -687,7 +735,6 @@ clean_env() {
 
     svc_stop hysteria-server 2>/dev/null; svc_disable hysteria-server 2>/dev/null
     
-    # 清理旧版 Python 订阅进程和 Nginx 订阅配置
     pkill -f "^python3 /var/www/hysteria/server.py$" 2>/dev/null || true
     rm -f /etc/nginx/conf.d/hysteria-sub.conf /etc/nginx/sites-available/hysteria-sub.conf /etc/nginx/sites-enabled/hysteria-sub.conf
     rm -f /etc/nginx/http.d/hysteria-sub.conf 2>/dev/null
@@ -774,7 +821,8 @@ generate_client_configs() {
     local web_dir="/var/www/hysteria"
     mkdir -p "$web_dir"
 
-    local sub_uuid=$(cat /root/.hy2_sub_uuid 2>/dev/null)
+    # 修复：防止二次生成订阅目录时包含脏字符
+    local sub_uuid=$(cat /root/.hy2_sub_uuid 2>/dev/null | LC_ALL=C tr -dc 'a-zA-Z0-9')
     [[ -z "$sub_uuid" ]] && sub_uuid=$(echo "${ip}-Hysteria2-Sub" | md5sum | head -c 16)
     echo "$sub_uuid" > /etc/hysteria/sub_path.txt
     
@@ -1013,6 +1061,7 @@ EOF
     fi
     echo "$cert_insecure_url" > /etc/hysteria/insecure_state.txt
 
+    # 修复：写入更安全的标识符锚点，以便后续修改路由不至于弄坏 YAML 文件
     cat << EOF > /etc/hysteria/config.yaml
 listen: :$port
 
@@ -1044,6 +1093,7 @@ resolver:
     addr: 8.8.8.8:53
     timeout: 4s
 
+# --- ROUTING_START ---
 acl:
   inline:
     - reject(169.254.0.0/16)
@@ -1055,6 +1105,7 @@ acl:
     - reject(fc00::/7)
     - reject(fe80::/10)
     - direct(all)
+# --- ROUTING_END ---
 
 masquerade:
   type: proxy
@@ -1223,7 +1274,7 @@ edit_config() {
     
     echo ""
     print_line
-    green "                  当前 Hysteria 2 节点配置                 "
+    green "                 当前 Hysteria 2 节点配置                 "
     print_line
     echo ""
     cat /etc/hysteria/config.yaml
@@ -1248,22 +1299,12 @@ edit_config() {
         svc_start hysteria-server
         sleep 1
         
-        if [[ $SYSTEM == "Alpine" ]]; then
-            if rc-service hysteria-server status | grep -q 'started'; then
-                green "  重启成功！新配置已生效。"
-                green "  正在同步更新客户端订阅配置..."
-                generate_client_configs
-            else
-                red "  [错误] 服务重启失败！请重新检查 yaml 文件的缩进和格式是否正确。"
-            fi
+        if is_svc_active hysteria-server; then
+            green "  重启成功！新配置已生效。"
+            green "  正在同步更新客户端订阅配置..."
+            generate_client_configs
         else
-            if systemctl is-active --quiet hysteria-server; then
-                green "  重启成功！新配置已生效。"
-                green "  正在同步更新客户端订阅配置..."
-                generate_client_configs
-            else
-                red "  [错误] 服务启动失败！请重新检查 yaml 文件的缩进和格式是否正确。"
-            fi
+            red "  [错误] 服务重启失败！请重新检查 yaml 文件的缩进和格式是否正确。"
         fi
     fi
     echo ""
@@ -1364,7 +1405,7 @@ hysteriaswitch() {
     clear
     echo ""
     print_line
-    green "                      服务运行状态控制                     "
+    green "                     服务运行状态控制                      "
     print_line
     echo ""
     echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}启动 Hysteria 2 及订阅服务${PLAIN}"
@@ -1785,34 +1826,43 @@ config_outbound() {
 
             cp -f /etc/hysteria/config.yaml /etc/hysteria/config.yaml.bak
 
+            # 修复：使用全新重写的 Python 解析逻辑，强依赖路由锚点替换，告别正则表达式误删 Bug
             local tmp_editor=$(mktemp /tmp/hy2_yaml_editor.XXXXXX.py)
             cat << 'EOF' > "$tmp_editor"
 import sys
 import re
 
+marker_start = "# --- ROUTING_START ---"
+marker_end = "# --- ROUTING_END ---"
+
 with open('/etc/hysteria/config.yaml', 'r') as f:
-    lines = f.readlines()
+    content = f.read()
 
-new_lines = []
-skip = False
-for line in lines:
-    if re.match(r'^(acl|outbound|outbounds):', line):
-        skip = True
-        continue
-        
-    if skip:
-        if line.strip() and not re.match(r'^\s', line) and not line.startswith('#'):
-            skip = False
-        else:
-            continue
-            
-    if not skip:
-        new_lines.append(line.rstrip('\n'))
-
-new_content = '\n'.join(new_lines).strip()
-new_content += '\n\n' + sys.argv[1].replace('\\n', '\n')
+new_routing = marker_start + '\n' + sys.argv[1].replace('\\n', '\n')
 if len(sys.argv) > 2 and sys.argv[2]:
-    new_content += '\n\n' + sys.argv[2].replace('\\n', '\n')
+    new_routing += '\n\n' + sys.argv[2].replace('\\n', '\n')
+new_routing += '\n' + marker_end
+
+if marker_start in content and marker_end in content:
+    pattern = re.compile(r'# --- ROUTING_START ---.*?# --- ROUTING_END ---', re.DOTALL)
+    new_content = pattern.sub(new_routing, content)
+else:
+    # 兼容没有添加锚点的旧版配置，安全擦除并附加
+    lines = content.split('\n')
+    cleaned_lines = []
+    skip = False
+    for line in lines:
+        if re.match(r'^(acl|outbound|outbounds):', line):
+            skip = True
+            continue
+        if skip:
+            if line.strip() and not re.match(r'^\s', line) and not line.startswith('#'):
+                skip = False
+            else:
+                continue
+        if not skip:
+            cleaned_lines.append(line)
+    new_content = '\n'.join(cleaned_lines).strip() + '\n\n' + new_routing
 
 with open('/etc/hysteria/config.yaml', 'w') as f:
     f.write(new_content + '\n')
@@ -1849,27 +1899,33 @@ EOF
 import sys
 import re
 
+marker_start = "# --- ROUTING_START ---"
+marker_end = "# --- ROUTING_END ---"
+
 with open('/etc/hysteria/config.yaml', 'r') as f:
-    lines = f.readlines()
+    content = f.read()
 
-new_lines = []
-skip = False
-for line in lines:
-    if re.match(r'^(acl|outbound|outbounds):', line):
-        skip = True
-        continue
-        
-    if skip:
-        if line.strip() and not re.match(r'^\s', line) and not line.startswith('#'):
-            skip = False
-        else:
+new_routing = marker_start + '\n' + sys.argv[1].replace('\\n', '\n') + '\n' + marker_end
+
+if marker_start in content and marker_end in content:
+    pattern = re.compile(r'# --- ROUTING_START ---.*?# --- ROUTING_END ---', re.DOTALL)
+    new_content = pattern.sub(new_routing, content)
+else:
+    lines = content.split('\n')
+    cleaned_lines = []
+    skip = False
+    for line in lines:
+        if re.match(r'^(acl|outbound|outbounds):', line):
+            skip = True
             continue
-            
-    if not skip:
-        new_lines.append(line.rstrip('\n'))
-
-new_content = '\n'.join(new_lines).strip()
-new_content += '\n\n' + sys.argv[1].replace('\\n', '\n')
+        if skip:
+            if line.strip() and not re.match(r'^\s', line) and not line.startswith('#'):
+                skip = False
+            else:
+                continue
+        if not skip:
+            cleaned_lines.append(line)
+    new_content = '\n'.join(cleaned_lines).strip() + '\n\n' + new_routing
 
 with open('/etc/hysteria/config.yaml', 'w') as f:
     f.write(new_content + '\n')
@@ -1942,14 +1998,7 @@ EOF
 
                 echo ""
                 yellow "  [2/2] 检查 Hysteria 2 守护进程运转情况..."
-                local is_active=0
-                if [[ $SYSTEM == "Alpine" ]]; then
-                    rc-service hysteria-server status 2>/dev/null | grep -q 'started' && is_active=1
-                else
-                    systemctl is-active --quiet hysteria-server 2>/dev/null && is_active=1
-                fi
-                
-                if [[ $is_active -eq 1 ]]; then
+                if is_svc_active hysteria-server; then
                     green "  [✔] 核心进程状态: 活跃 (Active & Running)"
                 else
                     red "  [✘] 核心进程状态: 停止/崩溃 (Inactive)"
@@ -2107,14 +2156,7 @@ server_status_check() {
                     red "  [✘] 未在配置中找到有效端口，请检查是否已正确安装。"
                 fi
 
-                local is_active=0
-                if [[ $SYSTEM == "Alpine" ]]; then
-                    rc-service hysteria-server status 2>/dev/null | grep -q 'started' && is_active=1
-                else
-                    systemctl is-active --quiet hysteria-server 2>/dev/null && is_active=1
-                fi
-                
-                if [[ $is_active -eq 1 ]]; then
+                if is_svc_active hysteria-server; then
                     green "  [✔] Hysteria 2 核心服务 (Daemon) 活跃中"
                     if command -v ps >/dev/null; then
                         local mem_usage=$(ps -C hysteria -o %mem= 2>/dev/null | awk '{sum+=$1} END {print sum}')
@@ -2153,14 +2195,7 @@ server_status_check() {
                     red "  [✘] 未找到订阅端口配置。"
                 fi
 
-                local is_active=0
-                if [[ $SYSTEM == "Alpine" ]]; then
-                    rc-service nginx status 2>/dev/null | grep -q 'started' && is_active=1
-                else
-                    systemctl is-active --quiet nginx 2>/dev/null && is_active=1
-                fi
-                
-                if [[ $is_active -eq 1 ]]; then
+                if is_svc_active nginx; then
                     green "  [✔] Nginx Web 服务器守护进程活跃中"
                 else
                     red "  [✘] Nginx 服务器已停止或异常崩溃"
@@ -2229,18 +2264,14 @@ server_status_check() {
 # =================================================================
 menu() {
     local status_ui="${LIGHT_RED}● 未运行 / 异常${PLAIN}"
-    if [[ $SYSTEM == "Alpine" ]]; then
-        rc-service hysteria-server status 2>/dev/null | grep -q 'started' && status_ui="${LIGHT_GREEN}● 运行中 (Active)${PLAIN}"
-    else
-        systemctl is-active --quiet hysteria-server 2>/dev/null && status_ui="${LIGHT_GREEN}● 运行中 (Active)${PLAIN}"
-    fi
+    is_svc_active hysteria-server && status_ui="${LIGHT_GREEN}● 运行中 (Active)${PLAIN}"
 
     clear
     green "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
-    echo -e "${LIGHT_GREEN}  ██████╗  ██╗   ██╗ ██████╗  ██╗       █████╗ ${PLAIN}"
-    echo -e "${LIGHT_GREEN}  ██╔══██╗ ██║   ██║ ██╔═══██╗██║      ██╔══██╗${PLAIN}"
-    echo -e "${LIGHT_GREEN}  ██║  ██║ ██║   ██║ ██║   ██║██║      ███████║${PLAIN}"
-    echo -e "${LIGHT_GREEN}  ██║  ██║ ██║   ██║ ██║   ██║██║      ██╔══██║${PLAIN}"
+    echo -e "${LIGHT_GREEN}  ██████╗  ██╗   ██╗ ██████╗  ██╗        █████╗ ${PLAIN}"
+    echo -e "${LIGHT_GREEN}  ██╔══██╗ ██║   ██║ ██╔═══██╗██║       ██╔══██╗${PLAIN}"
+    echo -e "${LIGHT_GREEN}  ██║  ██║ ██║   ██║ ██║   ██║██║       ███████║${PLAIN}"
+    echo -e "${LIGHT_GREEN}  ██║  ██║ ██║   ██║ ██║   ██║██║       ██╔══██║${PLAIN}"
     echo -e "${LIGHT_GREEN}  ██████╔╝ ╚██████╔╝ ╚██████╔╝███████╗ ██║  ██║${PLAIN}"
     echo -e "${LIGHT_GREEN}  ╚═════╝   ╚══════╝  ╚═════╝ ╚══════╝ ╚═╝  ╚═╝  ${LIGHT_YELLOW}[当前状态: ${status_ui}${LIGHT_YELLOW}]${PLAIN}"
     green "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
@@ -2283,7 +2314,6 @@ menu() {
     esac
 }
 
-# 启动脚本的死循环入口
 while true; do
     firstport=""
     endport=""
