@@ -1804,7 +1804,6 @@ config_outbound() {
                 acl_block+="    - proxy(all)"
             fi
 
-            # 恢复了原生且标准的 outbounds 数组结构
             local out_block="outbounds:\n  - name: proxy\n"
             if [[ "$out_type" == "socks5" ]]; then
                 local safe_user=$(echo "$out_user" | sed "s/'/''/g")
@@ -1818,7 +1817,7 @@ config_outbound() {
 
             cp -f /etc/hysteria/config.yaml /etc/hysteria/config.yaml.bak
 
-            local tmp_editor=$(mktemp /tmp/hy2_yaml_editor.XXXXXX.py)
+            local tmp_editor=$(mktemp /tmp/hy2_yaml_editor_XXXXXX)
             cat << 'EOF' > "$tmp_editor"
 import sys
 import re
@@ -1884,7 +1883,7 @@ EOF
             
             local default_acl="acl:\n  inline:\n    - reject(169.254.0.0/16)\n    - reject(::1/128)\n    - reject(127.0.0.0/8)\n    - reject(10.0.0.0/8)\n    - reject(172.16.0.0/12)\n    - reject(192.168.0.0/16)\n    - reject(fc00::/7)\n    - reject(fe80::/10)\n    - direct(all)"
             
-            local tmp_editor=$(mktemp /tmp/hy2_yaml_editor.XXXXXX.py)
+            local tmp_editor=$(mktemp /tmp/hy2_yaml_editor_XXXXXX)
             cat << 'EOF' > "$tmp_editor"
 import sys
 import re
