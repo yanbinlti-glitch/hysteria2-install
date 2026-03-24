@@ -531,6 +531,26 @@ inst_sub_port(){
 }
 
 inst_other_configs() {
+    realip
+    echo ""
+    print_line
+    yellow "  订阅链接 UUID 设置"
+    local current_uuid=""
+    if [[ -f /root/.hy2_sub_uuid ]]; then
+        current_uuid=$(cat /root/.hy2_sub_uuid)
+    else
+        current_uuid=$(echo "${ip}-Hysteria2-Sub" | md5sum | head -c 16)
+    fi
+    echo -e "  当前/默认的订阅 UUID 为: ${LIGHT_GREEN}${current_uuid}${PLAIN}"
+    echo -en " ${LIGHT_YELLOW} ▶ 是否重新随机生成一个新的 UUID？(y/n) [默认: n]: ${PLAIN}"
+    read change_uuid || exit 1
+    [[ -z $change_uuid ]] && change_uuid="n"
+    if [[ "$change_uuid" == "y" || "$change_uuid" == "Y" ]]; then
+        current_uuid=$(gen_random_str 16)
+        green " 已生成新的订阅 UUID: $current_uuid"
+    fi
+    echo "$current_uuid" > /root/.hy2_sub_uuid
+
     echo ""
     echo -en " ${LIGHT_YELLOW} ▶ 设置节点连接密码 (回车自动生成): ${PLAIN}"
     read auth_pwd || exit 1
@@ -738,13 +758,8 @@ generate_client_configs() {
     local web_dir="/var/www/hysteria"
     mkdir -p "$web_dir"
 
-    local sub_uuid=""
-    if [[ -f /root/.hy2_sub_uuid ]]; then
-        sub_uuid=$(cat /root/.hy2_sub_uuid)
-    else
-        sub_uuid=$(echo "${ip}-Hysteria2-Sub" | md5sum | head -c 16)
-        echo "$sub_uuid" > /root/.hy2_sub_uuid
-    fi
+    local sub_uuid=$(cat /root/.hy2_sub_uuid 2>/dev/null)
+    [[ -z "$sub_uuid" ]] && sub_uuid=$(echo "${ip}-Hysteria2-Sub" | md5sum | head -c 16)
     echo "$sub_uuid" > /etc/hysteria/sub_path.txt
     
     mkdir -p "$web_dir/$sub_uuid"
@@ -800,7 +815,6 @@ $([[ "$yaml_json_ip" == *":"* ]] && echo "  - IP-CIDR6,$yaml_json_ip/128,DIRECT,
 EOF
     mv -f "$web_dir/$sub_uuid/clash.tmp" "$web_dir/$sub_uuid/clash-meta-sub.yaml"
 
-    # 【升级点】使用 Nginx 代替 Python，处理 SSL、高并发分发
     local sub_cert_dir="$web_dir/certs"
     mkdir -p "$sub_cert_dir"
     
@@ -811,7 +825,6 @@ EOF
     chmod 400 "$sub_cert_dir/private.key" 2>/dev/null
     chmod -R 755 "$web_dir"
 
-    # 1. 动态适配各类系统的 Nginx 配置目录
     local nginx_conf_file="/etc/nginx/conf.d/hysteria-sub.conf"
     if [[ $SYSTEM == "Ubuntu" || $SYSTEM == "Debian" ]]; then
         mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled 2>/dev/null
@@ -831,13 +844,11 @@ EOF
     ssl_ciphers HIGH:!aNULL:!MD5;"
     fi
 
-    # 2. 动态检测 IPv6 状态
     local listen_ipv6=""
     if [[ -f /proc/net/if_inet6 ]]; then
         listen_ipv6="listen [::]:$sub_port $([[ -n "$ssl_config" ]] && echo "ssl");"
     fi
 
-    # 3. Nginx 配置写入
     cat << EOF > "$nginx_conf_file"
 server {
     listen $sub_port $([[ -n "$ssl_config" ]] && echo "ssl");
@@ -884,7 +895,6 @@ EOF
         yellow "  [提示] 请手动执行 'nginx -t' 命令查看具体报错原因。"
     fi
     
-    # 清理遗留的 Python 订阅服务
     svc_stop hysteria-sub 2>/dev/null
     svc_disable hysteria-sub 2>/dev/null
     rm -f /etc/systemd/system/hysteria-sub.service /etc/init.d/hysteria-sub
@@ -1995,6 +2005,201 @@ show_logs() {
     fi
 }
 
+server_status_check() {
+    while true; do
+        clear
+        echo ""
+        print_line
+        green "                 服务器综合运行状态检测中心                "
+        print_line
+        echo ""
+
+        # 1. 节点运行状态 (UDP 检测)
+        local main_port=$(grep -E "^[[:space:]]*listen:" /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ' | tr -d '\r' | tr -d '"')
+        local node_status_ui="${LIGHT_RED}[✘] 异常 / 未运行${PLAIN}"
+        if [[ -n "$main_port" ]] && ss -unl | grep -E -q "(:|^)$main_port( |$)"; then
+            node_status_ui="${LIGHT_GREEN}[✔] 正常 (UDP 端口: $main_port)${PLAIN}"
+        fi
+
+        # 2. 订阅分发状态 (TCP 检测)
+        local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null | tr -d '\r')
+        local sub_status_ui="${LIGHT_RED}[✘] 异常 / 未运行${PLAIN}"
+        if [[ -n "$sub_port" ]] && ss -tnl | grep -E -q "(:|^)$sub_port( |$)"; then
+            sub_status_ui="${LIGHT_GREEN}[✔] 正常 (TCP 端口: $sub_port)${PLAIN}"
+        fi
+
+        # 3. 证书安装状态
+        local cert_status_ui="${LIGHT_RED}[✘] 未安装 / 异常${PLAIN}"
+        local c_path=$(grep -w 'cert:' /etc/hysteria/config.yaml 2>/dev/null | awk '{print $2}' | tr -d '"' | tr -d "'")
+        if [[ -f "$c_path" ]] && command -v openssl >/dev/null; then
+            local cert_subject=$(openssl x509 -in "$c_path" -noout -subject 2>/dev/null | awk -F'CN = |CN=' '{print $2}' | awk -F',' '{print $1}')
+            local cert_issuer=$(openssl x509 -in "$c_path" -noout -issuer 2>/dev/null | awk -F'CN = |CN=|O = |O=' '{print $2}' | awk -F',' '{print $1}')
+            if [[ -n "$cert_subject" ]]; then
+                if [[ "$cert_subject" == "www.bing.com" || "$cert_issuer" =~ "bing.com" ]]; then
+                    cert_status_ui="${LIGHT_YELLOW}[✔] 必应自签伪装证书 ($cert_subject)${PLAIN}"
+                else
+                    cert_status_ui="${LIGHT_GREEN}[✔] 真实 CA 域名证书 ($cert_subject)${PLAIN}"
+                fi
+            fi
+        fi
+
+        # 4. 前置依赖状态
+        local env_status_ui="${LIGHT_GREEN}[✔] 全部完整${PLAIN}"
+        local cmds=("curl" "wget" "sudo" "ss" "iptables" "python3" "openssl" "socat" "qrencode" "jq" "sha256sum" "nginx")
+        local missing_deps=""
+        for cmd in "${cmds[@]}"; do
+            if ! command -v "$cmd" > /dev/null; then missing_deps="$missing_deps $cmd"; fi
+        done
+        if ! command -v crontab > /dev/null; then missing_deps="$missing_deps crontab"; fi
+        if [[ -n "$missing_deps" ]]; then
+            env_status_ui="${LIGHT_RED}[✘] 存在缺失${PLAIN}"
+        fi
+
+        echo -e "    ${LIGHT_GREEN}[1]${PLAIN} 节点运行状态 : ${node_status_ui}"
+        echo -e "    ${LIGHT_GREEN}[2]${PLAIN} 订阅分发状态 : ${sub_status_ui}"
+        echo -e "    ${LIGHT_GREEN}[3]${PLAIN} 证书安装状态 : ${cert_status_ui}"
+        echo -e "    ${LIGHT_GREEN}[4]${PLAIN} 前置依赖状态 : ${env_status_ui}"
+        echo -e "    ${LIGHT_GREEN}[5]${PLAIN} 服务器运行日志 (节点/订阅运行情况查阅)"
+        echo ""
+        echo -e "    ${LIGHT_GREEN}[0]${PLAIN} ${LIGHT_PURPLE}返回主菜单${PLAIN}"
+        echo ""
+        echo -en " ${LIGHT_YELLOW} ▶ 请选择要查看的详细状态 [0-5]: ${PLAIN}"
+        read status_choice || exit 1
+
+        case $status_choice in
+            1)
+                clear
+                echo ""
+                print_line
+                green "                 Hysteria 2 节点详细状态                   "
+                print_line
+                echo ""
+                if [[ -n "$main_port" ]]; then
+                    if ss -unl | grep -E -q "(:|^)$main_port( |$)"; then
+                        green "  [✔] UDP 端口 $main_port 监听正常！"
+                    else
+                        red "  [✘] UDP 端口 $main_port 未被监听！(可能会导致客户端连不上)"
+                    fi
+                else
+                    red "  [✘] 未在配置中找到有效端口，请检查是否已正确安装。"
+                fi
+
+                local is_active=0
+                if [[ $SYSTEM == "Alpine" ]]; then
+                    rc-service hysteria-server status 2>/dev/null | grep -q 'started' && is_active=1
+                else
+                    systemctl is-active --quiet hysteria-server 2>/dev/null && is_active=1
+                fi
+                
+                if [[ $is_active -eq 1 ]]; then
+                    green "  [✔] Hysteria 2 核心服务 (Daemon) 活跃中"
+                    if command -v ps >/dev/null; then
+                        local mem_usage=$(ps -C hysteria -o %mem= 2>/dev/null | awk '{sum+=$1} END {print sum}')
+                        local cpu_usage=$(ps -C hysteria -o %cpu= 2>/dev/null | awk '{sum+=$1} END {print sum}')
+                        [[ -n "$mem_usage" ]] && yellow "  ▶ 核心内存占用: $mem_usage %"
+                        [[ -n "$cpu_usage" ]] && yellow "  ▶ 核心 CPU 占用 : $cpu_usage %"
+                    fi
+                else
+                    red "  [✘] Hysteria 2 核心服务已崩溃或未启动！"
+                fi
+
+                if [[ -f /etc/hysteria/port_hop.txt ]]; then
+                    local hop_ports=$(cat /etc/hysteria/port_hop.txt)
+                    yellow "  ▶ 开启了跳跃端口模式: $hop_ports (请确保防火墙已放行此 UDP 区间)"
+                fi
+                
+                echo ""
+                echo -en " ${LIGHT_YELLOW} ▶ 按回车键返回检测中心... ${PLAIN}"
+                read temp
+                ;;
+            2)
+                clear
+                echo ""
+                print_line
+                green "                 Nginx 订阅分发详细状态                    "
+                print_line
+                echo ""
+                if [[ -n "$sub_port" ]]; then
+                    if ss -tnl | grep -E -q "(:|^)$sub_port( |$)"; then
+                        green "  [✔] TCP 端口 $sub_port 监听正常！"
+                    else
+                        red "  [✘] TCP 端口 $sub_port 未被监听！(会导致您的订阅链接无法拉取)"
+                    fi
+                else
+                    red "  [✘] 未找到订阅端口配置。"
+                fi
+
+                local is_active=0
+                if [[ $SYSTEM == "Alpine" ]]; then
+                    rc-service nginx status 2>/dev/null | grep -q 'started' && is_active=1
+                else
+                    systemctl is-active --quiet nginx 2>/dev/null && is_active=1
+                fi
+                
+                if [[ $is_active -eq 1 ]]; then
+                    green "  [✔] Nginx Web 服务器守护进程活跃中"
+                else
+                    red "  [✘] Nginx 服务器已停止或异常崩溃"
+                fi
+
+                echo ""
+                yellow "  ▶ 正在测试 Nginx 配置文件健康度..."
+                if nginx -t 2>&1 | grep -q "successful"; then
+                    green "  [✔] Nginx 语法及配置文件完美无误。"
+                else
+                    red "  [✘] Nginx 配置文件存在错误！具体报错如下："
+                    nginx -t
+                fi
+                
+                echo ""
+                echo -en " ${LIGHT_YELLOW} ▶ 按回车键返回检测中心... ${PLAIN}"
+                read temp
+                ;;
+            3)
+                check_cert
+                ;;
+            4)
+                clear
+                echo ""
+                print_line
+                green "                   前置依赖工具详细状态                    "
+                print_line
+                echo ""
+                local all_cmds=("curl" "wget" "sudo" "ss" "iptables" "python3" "openssl" "socat" "qrencode" "jq" "sha256sum" "nginx" "crontab")
+                for cmd in "${all_cmds[@]}"; do
+                    if command -v "$cmd" > /dev/null; then
+                        green "   [✔] 正常可用:  $cmd"
+                    else
+                        red "   [✘] 依赖缺失:  $cmd"
+                    fi
+                done
+                
+                echo ""
+                if [[ -z "$missing_deps" ]]; then
+                    green "  恭喜！您的系统具备所有运行 Hysteria 2 所需的基础工具环境。"
+                else
+                    yellow "  提示：发现依赖缺失。您可以在主菜单选择 [1] 重新覆盖部署，脚本会自动为您补全所需环境。"
+                fi
+                
+                echo ""
+                echo -en " ${LIGHT_YELLOW} ▶ 按回车键返回检测中心... ${PLAIN}"
+                read temp
+                ;;
+            5)
+                show_logs
+                ;;
+            0)
+                return
+                ;;
+            *)
+                red "  输入无效"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+
 # =================================================================
 #  8. 主菜单控制
 # =================================================================
@@ -2031,7 +2236,7 @@ menu() {
     echo -e "  ${LIGHT_GREEN}[7]${PLAIN} ${LIGHT_YELLOW}查看 客户端连接 与 流量统计${PLAIN}"
     echo -e "  ${LIGHT_GREEN}[8]${PLAIN} ${LIGHT_PURPLE}开启 BBR 及 UDP 极限并发加速 (强烈推荐)${PLAIN}"
     echo -e "  ${LIGHT_GREEN}[9]${PLAIN} ${LIGHT_GREEN}检查 证书安装状态与详细信息${PLAIN}"
-    echo -e "  ${LIGHT_GREEN}[10]${PLAIN} ${LIGHT_YELLOW}查看 节点运行日志 (全量排错 / 智能色彩高亮)${PLAIN}"
+    echo -e "  ${LIGHT_GREEN}[10]${PLAIN} ${LIGHT_YELLOW}服务器状态检测 (节点/订阅/证书/依赖/日志)${PLAIN}"
     echo "----------------------------------------------------------------------------------"
     echo -e "  ${LIGHT_GREEN}[0]${PLAIN} ${LIGHT_RED}退出脚本${PLAIN}"
     red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
@@ -2048,7 +2253,7 @@ menu() {
         7 ) check_traffic ;;
         8 ) enable_bbr ;;
         9 ) check_cert ;;
-        10 ) show_logs ;;
+        10 ) server_status_check ;;
         0 ) exit 0 ;;
         * ) red "  输入无效"; sleep 1 ;;
     esac
