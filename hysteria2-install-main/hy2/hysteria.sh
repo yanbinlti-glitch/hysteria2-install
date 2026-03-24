@@ -34,7 +34,7 @@ trap 'echo -e "\n\n ${LIGHT_RED}[警告] 检测到强行中断，脚本已安全
 # =================================================================
 [[ $EUID -ne 0 ]] && red " [错误] 请在 root 用户下运行此脚本！" && exit 1
 
-# 安全提取脚本路径 (修正 PATH 盲区，改为 /usr/bin)
+# 安全提取脚本路径
 SCRIPT_PATH=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
 if [[ -f "$SCRIPT_PATH" && "$(head -n 1 "$SCRIPT_PATH" 2>/dev/null)" == "#!/bin/bash" ]]; then
     if [[ "$SCRIPT_PATH" != "/usr/bin/hy2" ]]; then
@@ -78,7 +78,6 @@ realip() {
         ip=$(curl -s6m3 api64.ipify.org -k || curl -s6m3 ifconfig.me -k || curl -s6m3 ip.sb -k)
     fi
     
-    # 丢弃脆弱的正则，使用基础字符验证来防御空值和非法返回
     if [[ "$ip" != *.* && "$ip" != *:* ]]; then
         echo ""
         red " [错误] 无法获取本机的公网 IP，请检查 VPS 的网络连接或 DNS 设置！"
@@ -88,7 +87,6 @@ realip() {
 
 gen_random_str() {
     local len=$1
-    # 修复密码熵值过低，使用 64位安全字符，加入 LC_ALL=C 规避非法字节序列报错
     head -c 32 /dev/urandom | base64 | LC_ALL=C tr -dc 'a-zA-Z0-9' | head -c "$len"
 }
 
@@ -120,7 +118,6 @@ open_port() {
     mkdir -p /etc/hysteria
     echo "$proto:$port" >> /etc/hysteria/.firewall_state
     
-    # 互斥判断：优先 Firewalld，其次 UFW，最后 iptables
     if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
         firewall-cmd --zone=public --add-port=$port/$proto --permanent 2>/dev/null
         firewall-cmd --reload 2>/dev/null
@@ -150,7 +147,7 @@ close_port() {
 }
 
 # =================================================================
-#  4. 环境检查与预处理
+#  4. 环境检查与预处理 (升级: 引入 Nginx)
 # =================================================================
 check_env() {
     clear
@@ -162,7 +159,6 @@ check_env() {
     green "  当前操作系统: $SYSTEM"
     
     yellow "  正在校准系统时钟 (防御 TLS 时钟偏移瘫痪)..."
-    # 增加 -m 3 防止网络阻断导致无限卡死，加入备用源
     local date_str=$(curl -sI -m 3 https://google.com 2>/dev/null | grep -i Date | cut -d' ' -f3-6)
     [[ -z "$date_str" ]] && date_str=$(curl -sI -m 3 https://cloudflare.com 2>/dev/null | grep -i Date | cut -d' ' -f3-6)
     [[ -n "$date_str" ]] && date -s "${date_str}Z" 2>/dev/null || true
@@ -170,7 +166,8 @@ check_env() {
     yellow "  正在检查 Hysteria 2 核心及前置依赖包..."
     echo ""
     
-    local cmds=("curl" "wget" "sudo" "ss" "iptables" "python3" "openssl" "socat" "qrencode" "jq" "sha256sum")
+    # 【升级点】：加入 nginx 检查
+    local cmds=("curl" "wget" "sudo" "ss" "iptables" "python3" "openssl" "socat" "qrencode" "jq" "sha256sum" "nginx")
     local missing=0
 
     for cmd in "${cmds[@]}"; do
@@ -206,15 +203,15 @@ check_env() {
         
         [[ ! $SYSTEM == "CentOS" ]] && { $PKG_UPDATE || { echo ""; red " [错误] 系统软件源更新失败！请检查网络连接或更换软件源后重试。"; exit 1; }; }
         
+        # 【升级点】：所有系统的依赖安装都加入了 nginx
         if [[ $SYSTEM == "Alpine" ]]; then
-            $PKG_INSTALL curl wget sudo procps iptables ip6tables iproute2 python3 openssl socat cronie libqrencode-tools jq coreutils || { echo ""; red " [错误] 前置依赖安装失败！请检查系统源或网络后重试。"; exit 1; }
+            $PKG_INSTALL curl wget sudo procps iptables ip6tables iproute2 python3 openssl socat cronie libqrencode-tools jq coreutils nginx || { echo ""; red " [错误] 前置依赖安装失败！请检查系统源或网络后重试。"; exit 1; }
             rc-update add crond default 2>/dev/null; rc-service crond start 2>/dev/null
         elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" || $SYSTEM == "Alma" || $SYSTEM == "Rocky" ]]; then
             $PKG_INSTALL epel-release || { echo ""; red " [错误] epel-release 扩展源安装失败！"; exit 1; }
-            $PKG_INSTALL curl wget sudo procps iptables iptables-services iproute python3 openssl socat cronie qrencode jq coreutils || { echo ""; red " [错误] 前置依赖安装失败！请检查系统源或网络后重试。"; exit 1; }
+            $PKG_INSTALL curl wget sudo procps iptables iptables-services iproute python3 openssl socat cronie qrencode jq coreutils nginx || { echo ""; red " [错误] 前置依赖安装失败！请检查系统源或网络后重试。"; exit 1; }
             systemctl enable --now crond 2>/dev/null || systemctl enable --now cron 2>/dev/null
         else
-            # 增加 APT 锁等待防打断
             local wait_time=0
             while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/dpkg/lock >/dev/null 2>&1; do
                 sleep 3; wait_time=$((wait_time+3))
@@ -226,7 +223,7 @@ check_env() {
             apt-get --fix-broken -y install || { echo ""; red " [错误] 尝试修复系统损坏的依赖项失败！"; exit 1; }
             apt-get autoremove -y
             apt-get clean
-            apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" -y install curl wget sudo procps iptables-persistent netfilter-persistent iproute2 python3 openssl socat cron qrencode jq coreutils || { echo ""; red " [错误] 前置依赖安装失败！请检查 APT 源或网络后重试。"; exit 1; }
+            apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" -y install curl wget sudo procps iptables-persistent netfilter-persistent iproute2 python3 openssl socat cron qrencode jq coreutils nginx || { echo ""; red " [错误] 前置依赖安装失败！请检查 APT 源或网络后重试。"; exit 1; }
             systemctl enable --now cron 2>/dev/null || systemctl enable --now crond 2>/dev/null
         fi
         
@@ -269,7 +266,7 @@ inst_cert() {
             mkdir -p /var/www/hysteria/certs
             cp -f /root/cert.crt "$cert_path"
             cp -f /root/private.key "$key_path"
-            chown -R nobody /var/www/hysteria/certs
+            chown -R root:root /var/www/hysteria/certs
         else
             realip
             echo ""
@@ -345,18 +342,17 @@ inst_cert() {
             rm -f /root/cert.crt /root/private.key /root/ca.log
 
             yellow " 正在通过 DNS API 验证所有权，请留意下方执行日志 (约1-3分钟)..."
-            # 增加 --dnssleep 20 强制等待 DNS 传播，降低失败率
             bash /root/.acme.sh/acme.sh --issue --dns dns_cf -d "${domain}" -k ec-256 --dnssleep 20
             mkdir -p /var/www/hysteria/certs
 
-            # 修复 Cron 续期时环境变量丢失 systemctl 的问题
             local sys_cmd="/bin/systemctl"
             [[ ! -f "$sys_cmd" ]] && sys_cmd=$(command -v systemctl)
 
+            # 【升级点】续期后同步重启 Nginx 刷新证书
             if [[ $SYSTEM == "Alpine" ]]; then
-                local reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && chown -R nobody /var/www/hysteria/certs && (/sbin/rc-service hysteria-server restart || true) && (/sbin/rc-service hysteria-sub restart || true)"
+                local reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && chown -R root:root /var/www/hysteria/certs && (/sbin/rc-service hysteria-server restart || true) && (/sbin/rc-service nginx reload || true)"
             else
-                local reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && chown -R nobody /var/www/hysteria/certs && ($sys_cmd try-restart hysteria-server || true) && ($sys_cmd try-restart hysteria-sub || true)"
+                local reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && chown -R root:root /var/www/hysteria/certs && ($sys_cmd try-restart hysteria-server || true) && ($sys_cmd reload nginx || true)"
             fi
             
             bash /root/.acme.sh/acme.sh --install-cert -d "${domain}" --key-file /root/private.key --fullchain-file /root/cert.crt --ecc --reloadcmd "$reload_cmd"
@@ -381,7 +377,6 @@ inst_cert() {
         while true; do
             echo -en " ${LIGHT_YELLOW} ▶ 请输入公钥(crt)的绝对路径: ${PLAIN}"
             read cert_path || exit 1
-            # 修复暴力的 tr -d ' ' 导致合法空格被误杀
             cert_path=$(echo "$cert_path" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
             if [[ -f "$cert_path" ]]; then break; else red " [错误] 文件不存在，请重新输入！"; fi
         done
@@ -431,7 +426,6 @@ inst_port() {
         [[ -z $port ]] && port=$(shuf -i 10000-65535 -n 1)
     done
 
-    # 修复正则表达式误杀端口
     while ss -unl | grep -E -q "(:|^)$port( |$)"; do
         red " [警告] 端口 $port 已被占用！"
         echo -en " ${LIGHT_YELLOW} ▶ 重新设置主端口: ${PLAIN}"
@@ -468,13 +462,11 @@ inst_port() {
         green " 已开启端口跳跃范围: $firstport - $endport"
 
         echo "$firstport:$endport" > /etc/hysteria/port_hop.txt
-        # 记录跳跃端口规则到防火墙状态文件
         echo "udp:$firstport:$endport" >> /etc/hysteria/.firewall_state
 
         iptables -I INPUT -p udp --dport $firstport:$endport -j ACCEPT 2>/dev/null
         iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port 2>/dev/null
         
-        # 修复 IPv6 NAT 黑洞预判
         if lsmod | grep -q ip6table_nat || modprobe ip6table_nat 2>/dev/null; then
             ip6tables -I INPUT -p udp --dport $firstport:$endport -j ACCEPT 2>/dev/null || true
             ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port 2>/dev/null || true
@@ -484,7 +476,6 @@ inst_port() {
 
         if command -v ufw >/dev/null; then ufw allow $firstport:$endport/udp 2>/dev/null; fi
         if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
-            # 解决 Firewalld NAT 冲突
             firewall-cmd --zone=public --add-forward-port=port=$firstport-$endport:proto=udp:toport=$port --permanent 2>/dev/null
             firewall-cmd --reload 2>/dev/null
         fi
@@ -514,7 +505,6 @@ inst_sub_port(){
     fi
     [[ -z $sub_port_input ]] && sub_port_input=$(shuf -i 10000-30000 -n 1)
     
-    # 【修复体验瑕疵】增加对主端口的校验判断，防止订阅端口和主端口重叠导致死锁
     while [[ ! "$sub_port_input" =~ ^[0-9]+$ ]] || [[ "$sub_port_input" -lt 1024 ]] || [[ "$sub_port_input" -gt 65535 ]] || [[ "$sub_port_input" == "$port" ]] || { [[ -n "$firstport" && -n "$endport" ]] && [[ "$sub_port_input" -ge "$firstport" && "$sub_port_input" -le "$endport" ]]; }; do
         if [[ "$sub_port_input" == "$port" ]]; then
             red " [警告] 订阅端口不能与 Hysteria 主端口 ($port) 冲突！"
@@ -537,7 +527,6 @@ inst_sub_port(){
     green " 订阅端口已设置为: $sub_port_input"
     open_port $sub_port_input "tcp"
     
-    # 将最终确定的端口保存到 root 目录防丢失
     echo "$sub_port_input" > /root/.hy2_sub_port
     
     mkdir -p /etc/hysteria
@@ -575,7 +564,6 @@ inst_other_configs() {
     print_line
     yellow "  拥塞控制配置 (降低延迟的核心)"
     purple "  输入 0 将关闭 Brutal 算法并开启 BBR 回退自适应模式 (适合弱网或未知环境)"
-    purple "  【优化提示】服务端已配置防滥用机制，将强制接管带宽上限！"
     echo ""
     echo -en " ${LIGHT_YELLOW} ▶ 请输入 VPS 最大上行带宽 (Mbps, 输入 0 开启 BBR 自适应模式): ${PLAIN}"
     read bw_up_input || exit 1
@@ -637,7 +625,6 @@ inst_other_configs() {
 clean_env() {
     local mode="$1"
     
-    # 优先读取防火墙状态记录进行安全清洗
     if [[ -f /etc/hysteria/.firewall_state ]]; then
         while IFS=: read -r c_proto c_port c_endport; do
             if [[ -n "$c_endport" ]]; then
@@ -659,7 +646,6 @@ clean_env() {
         done < /etc/hysteria/.firewall_state
         rm -f /etc/hysteria/.firewall_state
     else
-        # 兼容旧版本的遗留配置回退
         local main_port=$(grep -E "^[[:space:]]*listen:" /etc/hysteria/config.yaml 2>/dev/null | awk -F ':' '{print $NF}' | tr -d ' ' | tr -d '\r' | tr -d '"')
         local sub_port=$(cat /etc/hysteria/sub_port.txt 2>/dev/null | tr -d '\r')
         [[ -n "$main_port" && "$main_port" =~ ^[0-9]+$ ]] && close_port "$main_port" "udp"
@@ -667,10 +653,11 @@ clean_env() {
     fi
 
     svc_stop hysteria-server 2>/dev/null; svc_disable hysteria-server 2>/dev/null
-    svc_stop hysteria-sub 2>/dev/null; svc_disable hysteria-sub 2>/dev/null
     
-    # 锚定彻底防误杀
+    # 清理旧版 Python 订阅进程和 Nginx 订阅配置
     pkill -f "^python3 /var/www/hysteria/server.py$" 2>/dev/null || true
+    rm -f /etc/nginx/conf.d/hysteria-sub.conf /etc/nginx/sites-available/hysteria-sub.conf /etc/nginx/sites-enabled/hysteria-sub.conf
+    if [[ $SYSTEM == "Alpine" ]]; then rc-service nginx reload 2>/dev/null; else systemctl reload nginx 2>/dev/null; fi
 
     if [[ $SYSTEM == "Alpine" ]]; then
         rm -f /etc/init.d/hysteria-server /etc/init.d/hysteria-sub
@@ -683,7 +670,6 @@ clean_env() {
     rm -rf /usr/local/bin/hysteria /etc/hysteria /var/www/hysteria
     
     if [[ "$mode" == "all" ]]; then
-        # 修复误杀博客证书的 BUG，改用官方移除或特定清理
         local h_domain=$(cat /root/ca.log 2>/dev/null | tr -d '\r')
         if [[ -f "/root/.acme.sh/acme.sh" && -n "$h_domain" ]]; then
             bash /root/.acme.sh/acme.sh --remove -d "$h_domain" 2>/dev/null
@@ -704,14 +690,12 @@ generate_client_configs() {
     
     local s_pwd=$(PWD="$raw_pwd" python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ.get('PWD', '')))")
     local safe_node_name=$(NAME="$custom_node_name" python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ.get('NAME', '')))")
-    # 修复双引号导致 YAML 崩溃的问题
     local safe_pwd_yaml=$(echo "$raw_pwd" | sed "s/'/''/g")
     
     local c_domain=$(grep 'sni:' /etc/hysteria/hy-client.yaml | awk '{print $2}')
     [[ -z "$c_domain" ]] && c_domain="www.bing.com"
     
     local c_server=$(grep '^server:' /etc/hysteria/hy-client.yaml | awk '{print $2}')
-    # 修复 IPv6 端口切割问题
     local primary_port=$(echo "$c_server" | awk -F':' '{print $NF}' | cut -d',' -f1)
     local hop_ports=$(echo "$c_server" | awk -F ',' '{print $2}')
     
@@ -722,7 +706,6 @@ generate_client_configs() {
     local clash_cert_verify="false"
     
     if [[ "$is_insecure_url" == "0" ]]; then
-        # 【修复一】只要是真实的 CA 证书，必须返回域名让客户端拉取，避免被阻断 TLS 握手
         echo "$c_domain" > /etc/hysteria/sub_host.txt
         if [[ "$force_skip" == "0" ]]; then
             clash_cert_verify="false"
@@ -757,7 +740,6 @@ generate_client_configs() {
     local web_dir="/var/www/hysteria"
     mkdir -p "$web_dir"
 
-    # 【升级】使用服务器 IP 生成固定的特征码，确保无论如何重装，路径永远不变
     local sub_uuid=""
     if [[ -f /root/.hy2_sub_uuid ]]; then
         sub_uuid=$(cat /root/.hy2_sub_uuid)
@@ -765,7 +747,6 @@ generate_client_configs() {
         sub_uuid=$(echo "${ip}-Hysteria2-Sub" | md5sum | head -c 16)
         echo "$sub_uuid" > /root/.hy2_sub_uuid
     fi
-    # 写入常规配置目录供查询功能调用
     echo "$sub_uuid" > /etc/hysteria/sub_path.txt
     
     mkdir -p "$web_dir/$sub_uuid"
@@ -773,7 +754,6 @@ generate_client_configs() {
     local url="hy2://$s_pwd@$uri_ip:$primary_port/?insecure=${is_insecure_url}&sni=$c_domain${mport_param}${obfs_param}#${safe_node_name}"
     echo "$url" > "$web_dir/$sub_uuid/url.txt"
     
-    # 【修复二】安全生成 Base64，防止因特殊系统缺失参数而清空文件
     local b64_str=$(printf "%s" "$url" | base64 -w 0 2>/dev/null)
     if [[ -z "$b64_str" ]]; then
         b64_str=$(printf "%s" "$url" | base64 | tr -d '\r\n')
@@ -782,7 +762,6 @@ generate_client_configs() {
 
     local sub_port=$(cat /etc/hysteria/sub_port.txt)
 
-    # 原子化写入，防止并发拉取订阅时遇到空文件
     cat << EOF > "$web_dir/$sub_uuid/clash.tmp"
 port: 7890
 socks-port: 7891
@@ -815,175 +794,82 @@ proxy-groups:
       - DIRECT
 
 rules:
-  # 【修复三】解决 IPv6 在 Clash 中的语法崩溃死锁问题
 $([[ "$yaml_json_ip" == *":"* ]] && echo "  - IP-CIDR6,$yaml_json_ip/128,DIRECT,no-resolve" || echo "  - IP-CIDR,$yaml_json_ip/32,DIRECT,no-resolve")
   - DST-PORT,$sub_port,DIRECT
-  
-  # 局域网与国内直连
   - GEOIP,LAN,DIRECT,no-resolve
   - GEOIP,CN,DIRECT
-  
-  # 其余流量走代理
   - MATCH,节点选择
 EOF
     mv -f "$web_dir/$sub_uuid/clash.tmp" "$web_dir/$sub_uuid/clash-meta-sub.yaml"
 
+    # 【升级点】使用 Nginx 代替 Python，处理 SSL、高并发分发
     local sub_cert_dir="$web_dir/certs"
     mkdir -p "$sub_cert_dir"
     
     cp -L "$cert_path" "$sub_cert_dir/cert.crt" 2>/dev/null || cp -L /etc/hysteria/cert.crt "$sub_cert_dir/cert.crt"
     cp -L "$key_path" "$sub_cert_dir/private.key" 2>/dev/null || cp -L /etc/hysteria/private.key "$sub_cert_dir/private.key"
     
-    chown -R nobody "$sub_cert_dir"
+    chown -R root:root "$sub_cert_dir"
     chmod 400 "$sub_cert_dir/private.key"
+    chmod -R 755 "$web_dir"
+
+    local nginx_conf_dir="/etc/nginx/conf.d"
+    [[ $SYSTEM == "Ubuntu" || $SYSTEM == "Debian" ]] && nginx_conf_dir="/etc/nginx/sites-available"
     
-    cat << EOF > "$web_dir/server.py"
-import http.server
-import socketserver
-import ssl
-import os
-import urllib.parse
-import socket
-import errno
+    mkdir -p /etc/nginx/conf.d /etc/nginx/sites-available /etc/nginx/sites-enabled 2>/dev/null
+    
+    local ssl_config=""
+    if [[ "${is_insecure_url}" == "0" && -f "$sub_cert_dir/cert.crt" && -f "$sub_cert_dir/private.key" ]]; then
+        ssl_config="ssl_certificate $sub_cert_dir/cert.crt;
+    ssl_certificate_key $sub_cert_dir/private.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;"
+    fi
 
-# 修复 Slowloris 线程假死漏洞
-socket.setdefaulttimeout(10)
+    cat << EOF > /etc/nginx/conf.d/hysteria-sub.conf
+server {
+    listen $sub_port $([[ -n "$ssl_config" ]] && echo "ssl");
+    listen [::]:$sub_port $([[ -n "$ssl_config" ]] && echo "ssl");
+    
+    $ssl_config
 
-PORT = $sub_port
-SUB_UUID = "$sub_uuid"
-CERT_FILE = "$sub_cert_dir/cert.crt"
-KEY_FILE = "$sub_cert_dir/private.key"
-WEB_DIR = "$web_dir"
-
-class SecureSubHandler(http.server.BaseHTTPRequestHandler):
-    server_version = "nginx/1.24.0"
-    sys_version = ""
-    timeout = 5 # 新增：单个请求如果 5 秒拉不下来直接掐断，防止占死端口
-
-    # 开放订阅访问日志，实时输出客户端拉取情况
-    def log_message(self, format, *args):
-        print(f"[Sub Server] {self.address_string()} - {format % args}", flush=True)
-
-    def handle(self):
-        try:
-            super().handle()
-        except socket.timeout:
-            pass
-        except socket.error as e:
-            # 忽略由客户端强行断开引起的 Broken pipe 和 Connection reset by peer 报错
-            if e.errno not in (errno.EPIPE, errno.ECONNRESET):
-                pass
-        except Exception:
-            pass
-
-    def do_GET(self):
-        parsed = urllib.parse.urlparse(self.path)
-        req_path = parsed.path.strip('/')
+    location = /$sub_uuid {
+        alias $web_dir/$sub_uuid;
         
-        if req_path == SUB_UUID:
-            try:
-                with open(f"{WEB_DIR}/{SUB_UUID}/clash-meta-sub.yaml", 'rb') as f:
-                    clash_data = f.read()
-                with open(f"{WEB_DIR}/{SUB_UUID}/sub_b64.txt", 'rb') as f:
-                    b64_data = f.read()
-            except FileNotFoundError:
-                clash_data = b""
-                b64_data = b""
+        add_header Content-Type 'text/plain; charset=utf-8';
+        add_header Cache-Control 'no-store, no-cache, must-revalidate, max-age=0';
+        add_header profile-update-interval '24';
 
-            self.send_response(200)
-            self.send_header('Content-type', 'text/plain; charset=utf-8')
-            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
-            self.send_header('profile-update-interval', '24')
-            self.end_headers()
-            
-            ua = self.headers.get('User-Agent', '').lower()
-            if any(x in ua for x in ['clash', 'meta', 'verge', 'stash', 'mihomo']):
-                self.wfile.write(clash_data)
-            else:
-                self.wfile.write(b64_data + b"\n")
-        else:
-            self.send_response(403)
-            self.send_header('Content-type', 'text/html; charset=utf-8')
-            self.end_headers()
-            self.wfile.write(b"<html><head><title>403 Forbidden</title></head><body><center><h1>403 Forbidden</h1></center><hr><center>nginx</center></body></html>")
+        if (\$http_user_agent ~* "(clash|meta|verge|stash|mihomo)") {
+            rewrite ^ /$sub_uuid/clash-meta-sub.yaml break;
+        }
+        rewrite ^ /$sub_uuid/sub_b64.txt break;
+    }
 
-class DualStackServer(socketserver.ThreadingTCPServer):
-    daemon_threads = True
-    allow_reuse_address = True
-    address_family = getattr(socket, 'AF_INET6', socket.AF_INET)
-
-    def server_bind(self):
-        if hasattr(socket, 'AF_INET6') and self.address_family == socket.AF_INET6:
-            try:
-                self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-            except (AttributeError, OSError):
-                pass
-        super().server_bind()
-
-try:
-    httpd = DualStackServer(("", PORT), SecureSubHandler)
-except OSError:
-    DualStackServer.address_family = socket.AF_INET
-    httpd = DualStackServer(("0.0.0.0", PORT), SecureSubHandler)
-
-if "${is_insecure_url}" == "0" and os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
-    try:
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    except AttributeError:
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS)
-    context.load_cert_chain(certfile=CERT_FILE, keyfile=KEY_FILE)
-    httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
-
-httpd.serve_forever()
+    location / {
+        return 403;
+    }
+}
 EOF
 
-    chown -R nobody "$web_dir"
-    
-    if [[ $SYSTEM == "Alpine" ]]; then
-        cat << EOF > /etc/init.d/hysteria-sub
-#!/sbin/openrc-run
-description="Hysteria Subscription Server"
-command="/usr/bin/env"
-command_args="python3 ${web_dir}/server.py"
-command_background=true
-command_user="nobody"
-directory="${web_dir}"
-pidfile="/run/hysteria-sub.pid"
-output_log="/var/log/hysteria-sub.log"
-error_log="/var/log/hysteria-sub.log"
-EOF
-        chmod +x /etc/init.d/hysteria-sub
-        rc-update add hysteria-sub default
+    if [[ $SYSTEM == "Ubuntu" || $SYSTEM == "Debian" ]]; then
+        mv -f /etc/nginx/conf.d/hysteria-sub.conf /etc/nginx/sites-available/hysteria-sub.conf
+        ln -sf /etc/nginx/sites-available/hysteria-sub.conf /etc/nginx/sites-enabled/
+    fi
+
+    if nginx -t >/dev/null 2>&1; then
+        svc_enable nginx 2>/dev/null
+        if [[ $SYSTEM == "Alpine" ]]; then rc-service nginx restart 2>/dev/null; else systemctl restart nginx 2>/dev/null; fi
     else
-        cat << EOF > /etc/systemd/system/hysteria-sub.service
-[Unit]
-Description=Hysteria Subscription Server
-After=network.target
-
-[Service]
-Type=simple
-User=nobody
-WorkingDirectory=${web_dir}
-ExecStart=/usr/bin/env python3 ${web_dir}/server.py
-Restart=always
-RestartSec=3
-StandardOutput=journal
-StandardError=journal
-SyslogLevel=warning
-ProtectSystem=full
-ProtectHome=true
-PrivateTmp=true
-NoNewPrivileges=true
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        systemctl daemon-reload
-        systemctl enable hysteria-sub
+        echo ""
+        red "  [警告] Nginx 配置测试失败，订阅服务可能无法正常启动！"
     fi
     
+    # 清理掉老旧系统的 Python 服务残留
     svc_stop hysteria-sub 2>/dev/null
-    svc_start hysteria-sub
+    svc_disable hysteria-sub 2>/dev/null
+    rm -f /etc/systemd/system/hysteria-sub.service /etc/init.d/hysteria-sub
+    systemctl daemon-reload 2>/dev/null
 }
 
 insthysteria() {
@@ -1012,10 +898,8 @@ insthysteria() {
         *) red " [错误] 不支持的架构: $arch" && exit 1 ;;
     esac
     
-    # 【修复重点】彻底跳过下载并比对 sha256，防止镜像站缓存不同步报错卡死
     wget --timeout=10 --tries=3 -N -v -O /usr/local/bin/hysteria "https://ghfast.top/https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}"
     
-    # 强制进入安全兜底：使用基础文件体积验证判断下载是否完整
     yellow "  [提示] 使用基础文件体积验证核心完整性..."
     local file_size=$(stat -c%s "/usr/local/bin/hysteria" 2>/dev/null || stat -f%z "/usr/local/bin/hysteria" 2>/dev/null)
     if [[ -z "$file_size" || "$file_size" -lt 10000000 ]]; then
@@ -1042,7 +926,6 @@ rc_ulimit="-n 524288"
 EOF
         chmod +x /etc/init.d/hysteria-server
     else
-        # 增加安全沙盒及合理句柄限制，避免全系统锁死
         cat << EOF > /etc/systemd/system/hysteria-server.service
 [Unit]
 Description=Hysteria 2 Server
@@ -1168,7 +1051,7 @@ EOF
     
     echo ""
     print_line
-    green "  Hysteria 2 服务端及智能订阅安装部署完成！"
+    green "  Hysteria 2 服务端及 Nginx 智能订阅部署完成！"
     purple "  请在主菜单选择 [6] 获取节点与二维码。"
     echo ""
     sleep 3
@@ -1230,7 +1113,7 @@ showconf() {
     green "                 Hysteria 2 全平台智能订阅                 "
     print_line
     echo ""
-    yellow "  ▶ [智能订阅链接] (推荐)"
+    yellow "  ▶ [智能订阅链接] (由 Nginx 极速驱动)"
     purple "    适用客户端: Clash Verge / v2rayN / Shadowrocket"
     green  "    订阅地址: ${sub_url}"
     echo ""
@@ -1414,18 +1297,16 @@ except Exception as e:
 
 starthysteria() {
     svc_start hysteria-server
-    svc_start hysteria-sub
+    if [[ $SYSTEM == "Alpine" ]]; then rc-service nginx restart 2>/dev/null; else systemctl restart nginx 2>/dev/null; fi
     echo ""
-    green "  Hysteria 2 及订阅服务已启动！"
+    green "  Hysteria 2 及 Nginx 订阅服务已启动！"
     sleep 2
 }
 
 stophysteria_only() {
     svc_stop hysteria-server
-    svc_stop hysteria-sub
-    pkill -f "^python3 /var/www/hysteria/server.py$" 2>/dev/null || true
     echo ""
-    yellow "  Hysteria 2 及订阅服务已停止！"
+    yellow "  Hysteria 2 核心服务已停止！(静态订阅 Nginx 仍保持运行)"
 }
 
 hysteriaswitch() {
@@ -1436,7 +1317,7 @@ hysteriaswitch() {
     print_line
     echo ""
     echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}启动 Hysteria 2 及订阅服务${PLAIN}"
-    echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_RED}停止 Hysteria 2 及订阅服务${PLAIN}"
+    echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_RED}停止 Hysteria 2 核心服务${PLAIN}"
     echo -e "    ${LIGHT_GREEN}[3]${PLAIN} ${LIGHT_YELLOW}重启 Hysteria 2 及订阅服务${PLAIN}"
     echo ""
     echo -e "    ${LIGHT_GREEN}[0]${PLAIN} ${LIGHT_PURPLE}返回主菜单${PLAIN}"
@@ -1484,7 +1365,6 @@ enable_bbr() {
     local udp_mid=$(( udp_max * 3 / 4 ))
     local udp_min=$(( udp_max / 2 ))
 
-    # 动态检查当前 fs.file-max，避免降低高配机器的上限
     local current_file_max=$(sysctl -n fs.file-max 2>/dev/null || echo 0)
     local file_max_config=""
     if [[ "$current_file_max" -lt 1048576 ]]; then
@@ -1492,7 +1372,6 @@ enable_bbr() {
     fi
 
     mkdir -p /etc/sysctl.d
-    # 修复系统内核 FD 硬锁死
     cat << EOF > /etc/sysctl.d/99-hysteria-bbr.conf
 $file_max_config
 net.core.default_qdisc=fq
@@ -1506,10 +1385,8 @@ net.core.somaxconn=65535
 net.ipv4.udp_mem=$udp_min $udp_mid $udp_max
 EOF
     
-    # 加入 -e 忽略只读错误，兼容 LXC 容器
     sysctl -e --system >/dev/null 2>&1 || sysctl -e -p /etc/sysctl.d/99-hysteria-bbr.conf >/dev/null 2>&1 || sysctl -e -p >/dev/null 2>&1
     
-    # 修复 LXC 容器欺骗阳性
     if sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q bbr; then
         echo ""
         green "  BBR 及极致的 UDP 缓冲区底层调优开启成功！"
@@ -1546,24 +1423,16 @@ check_cert() {
 
     if [[ -z "$cert_path" || -z "$key_path" ]]; then
         red "  [✘] 配置文件中的证书路径为空！"
-        yellow "  ▶ 报错原因: config.yaml 配置被破坏，或安装时参数未能正确写入。"
         has_error=1
     else
         if [[ ! -f "$cert_path" ]]; then
             red "  [✘] 找不到证书公钥 (Cert): $cert_path"
-            yellow "  ▶ 报错原因排查:"
-            yellow "     1. [API 错误] Cloudflare Token/Key 填错，或权限不足。"
-            yellow "     2. [DNS 未生效] 刚买的域名解析还没生效，导致 Acme.sh 无法验证。"
-            yellow "     3. [频率限制] 短时间内频繁重装，触发了 Let's Encrypt 的风控机制。"
-            yellow "     4. [路径拼写] 如果您选了自定义路径，可能是手误打错了绝对路径。"
             has_error=1
         elif [[ ! -s "$cert_path" ]]; then
             red "  [✘] 证书公钥 (Cert) 大小为 0 字节！"
-            yellow "  ▶ 报错原因: Acme.sh 申请过程中被强制杀掉进程，或您的 VPS 磁盘空间已爆满。"
             has_error=1
         elif ! grep -q "BEGIN" "$cert_path"; then
             red "  [✘] 证书公钥 (Cert) 格式异常！"
-            yellow "  ▶ 报错原因: 文件内容损坏，不是标准的 PEM 格式。可能被其他程序覆写。"
             has_error=1
         else
             green "  [✔] 公钥 (Cert) 基础状态正常: $cert_path"
@@ -1571,15 +1440,12 @@ check_cert() {
 
         if [[ ! -f "$key_path" ]]; then
             red "  [✘] 找不到证书私钥 (Key): $key_path"
-            yellow "  ▶ 报错原因: 私钥生成失败，同上请检查 API 和 DNS 状态。"
             has_error=1
         elif [[ ! -s "$key_path" ]]; then
             red "  [✘] 证书私钥 (Key) 大小为 0 字节！"
-            yellow "  ▶ 报错原因: 系统在生成私钥时出错，可能是 VPS 熵池不足或磁盘已满。"
             has_error=1
         elif ! grep -q "PRIVATE KEY" "$key_path"; then
             red "  [✘] 证书私钥 (Key) 格式异常！"
-            yellow "  ▶ 报错原因: 文件不是合法的私钥文件，请检查是否混入了其他文本。"
             has_error=1
         else
             green "  [✔] 私钥 (Key) 基础状态正常: $key_path"
@@ -1614,7 +1480,6 @@ check_cert() {
             if [[ -n "$days_left" && "$days_left" =~ ^-?[0-9]+$ ]]; then
                 if [[ $days_left -lt 0 ]]; then
                     red "  ▶ 证书过期日期    : $cert_end (⚠ 已经过期！)"
-                    yellow "  ▶ 报错原因        : 证书已过期，Acme.sh 自动续期任务可能已失效。"
                 elif [[ $days_left -lt 15 ]]; then
                     red "  ▶ 证书过期日期    : $cert_end (⚠ 仅剩 $days_left 天，即将过期！)"
                 else
@@ -1635,7 +1500,6 @@ check_cert() {
                     green "  ▶ 证书与私钥匹配  : [✔] 完美配对 (RSA)"
                 else
                     red "  ▶ 证书与私钥匹配  : [✘] 不匹配！"
-                    yellow "  ▶ 报错原因        : 现在的私钥解不开当前的公钥！可能是手动替换文件时只换了其中一个，或者生成时发生了错乱。"
                     is_mismatch=1
                 fi
             else
@@ -1651,7 +1515,6 @@ check_cert() {
                     green "  ▶ 证书与私钥匹配  : [✔] 完美配对 (ECC)"
                 else
                     red "  ▶ 证书与私钥匹配  : [✘] 不匹配！"
-                    yellow "  ▶ 报错原因        : ECC 公钥指纹与私钥不对应。必须保证 crt 和 key 是同一批次生成的。"
                     is_mismatch=1
                 fi
             fi
@@ -1680,14 +1543,14 @@ check_cert() {
                         mkdir -p /var/www/hysteria/certs
                         cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt
                         cp -f /root/private.key /var/www/hysteria/certs/private.key
-                        chown -R nobody /var/www/hysteria/certs
+                        chown -R root:root /var/www/hysteria/certs
                         
                         if [[ $SYSTEM == "Alpine" ]]; then
                             rc-service hysteria-server restart 2>/dev/null
-                            rc-service hysteria-sub restart 2>/dev/null
+                            rc-service nginx reload 2>/dev/null
                         else
                             systemctl restart hysteria-server 2>/dev/null
-                            systemctl restart hysteria-sub 2>/dev/null
+                            systemctl reload nginx 2>/dev/null
                         fi
                         echo ""
                         green "  [✔] 修复完成！核心服务与订阅服务已自动同步并重启。"
@@ -1712,7 +1575,6 @@ check_cert() {
                         green "  ▶ Cron 定时任务   : [✔] 正常运行中"
                     else
                         red "  ▶ Cron 定时任务   : [✘] 缺失！"
-                        yellow "  ▶ 报错原因        : 系统的 crontab 被清空或卸载了 cronie 组件，证书到期后将无法自动续期。"
                     fi
                 fi
             fi
@@ -1739,7 +1601,6 @@ config_outbound() {
         sleep 2; return
     fi
 
-    # 检查当前是否开启了 outbounds 及路由模式
     if grep -q "^outbound" /etc/hysteria/config.yaml; then
         local current_type=$(awk '/^outbound/,0' /etc/hysteria/config.yaml | grep "type:" | head -n 1 | awk '{print $2}' | tr -d '\r')
         local route_mode_str="未知/自定义"
@@ -1788,7 +1649,6 @@ config_outbound() {
             local out_pass=""
             local out_addr=""
 
-            # 修复 URI 截取 Bug，防止包含 @ 的密码崩溃
             if [[ "$proxy_uri" =~ ^(socks5|http)://(.*) ]]; then
                 out_type="${BASH_REMATCH[1]}"
                 local remain="${BASH_REMATCH[2]}"
@@ -1812,7 +1672,6 @@ config_outbound() {
             local geo_info=$(curl -x "$curl_proxy" -s -m 7 "http://ip-api.com/json/?lang=zh-CN")
             local api_status=$(echo "$geo_info" | jq -r '.status' 2>/dev/null)
             
-            # 加入 ipinfo.io 兜底处理 ip-api 被限流的情况
             if [[ "$api_status" != "success" ]]; then
                 geo_info=$(curl -x "$curl_proxy" -s -m 7 "https://ipinfo.io/json")
                 local test_ip=$(echo "$geo_info" | jq -r '.ip' 2>/dev/null)
@@ -1856,7 +1715,6 @@ config_outbound() {
 
             local acl_block="acl:\n  inline:\n    - reject(169.254.0.0/16)\n    - reject(::1/128)\n    - reject(127.0.0.0/8)\n    - reject(10.0.0.0/8)\n    - reject(172.16.0.0/12)\n    - reject(192.168.0.0/16)\n    - reject(fc00::/7)\n    - reject(fe80::/10)\n"
             
-            # 【修复致命语法残留】去除了非法的 http:// 路径前缀，使其完全符合 Hysteria 2 ACL 规则
             if [[ "$route_mode" == 1 ]]; then
                 acl_block+="    - proxy(suffix:openai.com)\n    - proxy(suffix:chatgpt.com)\n    - proxy(suffix:anthropic.com)\n    - proxy(suffix:claude.ai)\n    - proxy(suffix:ai.ndai.top)\n    - proxy(suffix:netflix.com)\n    - proxy(suffix:nflxvideo.net)\n    - proxy(suffix:nflxext.com)\n    - proxy(suffix:nflxso.net)\n    - proxy(suffix:disneyplus.com)\n    - proxy(suffix:dssott.com)\n    - proxy(suffix:bamgrid.com)\n    - proxy(suffix:hulu.com)\n    - proxy(suffix:primevideo.com)\n    - proxy(suffix:amazon.video)\n    - proxy(suffix:googleusercontent.com/spotify.com/0)\n    - direct(all)"
             else
@@ -1876,7 +1734,6 @@ config_outbound() {
 
             cp -f /etc/hysteria/config.yaml /etc/hysteria/config.yaml.bak
 
-            # 修复 YAML 注入并防御 Symlink 劫持漏洞
             local tmp_editor=$(mktemp /tmp/hy2_yaml_editor.XXXXXX.py)
             cat << 'EOF' > "$tmp_editor"
 import sys
@@ -2074,43 +1931,47 @@ show_logs() {
         sleep 2; return
     fi
 
-    echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}实时滚屏监控 (包含 节点核心连接 + 订阅拉取记录，按 Ctrl+C 退出)${PLAIN}"
-    echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_PURPLE}全量翻页查阅 (静态查看历史完整原始日志，支持搜索，看完按 q 退出)${PLAIN}"
+    echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}实时滚屏监控 (节点连接情况，按 Ctrl+C 退出)${PLAIN}"
+    echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_PURPLE}全量翻页查阅 (全量历史原始日志，看完按 q 退出)${PLAIN}"
+    echo -e "    ${LIGHT_GREEN}[3]${PLAIN} ${LIGHT_YELLOW}查阅 Nginx 订阅分发日志 (验证订阅拉取情况)${PLAIN}"
     echo ""
-    echo -en " ${LIGHT_YELLOW} ▶ 请输入选项 [1-2] (默认1): ${PLAIN}"
+    echo -en " ${LIGHT_YELLOW} ▶ 请输入选项 [1-3] (默认1): ${PLAIN}"
     read log_choice || log_choice=1
     [[ -z "$log_choice" ]] && log_choice=1
 
-    yellow "  ▶ 正在抓取全方面原始日志..."
-    yellow "  (包含 Hysteria 核心协议握手、客户端访问以及订阅链接的拉取日志)"
+    echo ""
+    if [[ "$log_choice" == "3" ]]; then
+        yellow "  ▶ 正在过滤并抓取 Nginx 订阅访问日志..."
+        local sub_uuid=$(cat /etc/hysteria/sub_path.txt 2>/dev/null)
+        if [[ -n "$sub_uuid" ]]; then
+            grep "$sub_uuid" /var/log/nginx/access.log | tail -n 50 | less -R || tail -n 50 /var/log/nginx/access.log | less -R
+        else
+            tail -n 50 /var/log/nginx/access.log | less -R
+        fi
+        return
+    fi
+
+    yellow "  ▶ 正在抓取 Hysteria 核心日志..."
     sleep 1
     echo ""
 
     if [[ $SYSTEM == "Alpine" ]]; then
-        # 补丁：确保 Alpine 有日志文件，防止 tail 报错
         if ! grep -q "output_log" /etc/init.d/hysteria-server 2>/dev/null; then
             sed -i '/pidfile/a output_log="/var/log/hysteria.log"\nerror_log="/var/log/hysteria.log"' /etc/init.d/hysteria-server 2>/dev/null
             rc-service hysteria-server restart >/dev/null 2>&1
         fi
-        
         touch /var/log/hysteria.log 2>/dev/null
-        touch /var/log/hysteria-sub.log 2>/dev/null
 
         if [[ "$log_choice" == "2" ]]; then
-            # 静态合并查看
-            cat /var/log/hysteria.log /var/log/hysteria-sub.log | less -R
+            cat /var/log/hysteria.log | less -R
         else
-            # 实时双线监控（实时追踪 tail -f）
-            tail -n 50 -f /var/log/hysteria.log /var/log/hysteria-sub.log
+            tail -n 50 -f /var/log/hysteria.log
         fi
     else
-        # Systemd 环境逻辑 (Ubuntu/Debian/CentOS 等)
         if [[ "$log_choice" == "2" ]]; then
-            # 使用 journalctl 同时导出 server 和 sub 服务的全量原始日志
-            journalctl -u hysteria-server -u hysteria-sub --no-pager | less -R
+            journalctl -u hysteria-server --no-pager | less -R
         else
-            # 实时流式输出 (-f 持续监听)
-            journalctl -u hysteria-server -u hysteria-sub -n 50 -f
+            journalctl -u hysteria-server -n 50 -f
         fi
     fi
 }
@@ -2119,7 +1980,6 @@ show_logs() {
 #  8. 主菜单控制
 # =================================================================
 menu() {
-    # 增加状态判定
     local status_ui="${LIGHT_RED}● 未运行 / 异常${PLAIN}"
     if [[ $SYSTEM == "Alpine" ]]; then
         rc-service hysteria-server status 2>/dev/null | grep -q 'started' && status_ui="${LIGHT_GREEN}● 运行中 (Active)${PLAIN}"
@@ -2136,7 +1996,7 @@ menu() {
     echo -e "${LIGHT_GREEN}  ██████╔╝ ╚██████╔╝ ╚██████╔╝███████╗ ██║  ██║${PLAIN}"
     echo -e "${LIGHT_GREEN}  ╚═════╝   ╚══════╝  ╚═════╝ ╚══════╝ ╚═╝  ╚═╝${PLAIN}"
     green "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
-    echo -e " ${LIGHT_GREEN}项目名称 ：Hysteria 2 一键部署与管理脚本 (单人旗舰加固版)${PLAIN}"
+    echo -e " ${LIGHT_GREEN}项目名称 ：Hysteria 2 一键部署与管理脚本 (Nginx订阅加强版)${PLAIN}"
     echo -e " ${LIGHT_PURPLE}项目地址 ：哆啦的Github库 https://github.com/yanbinlti-glitch         [当前状态: ${status_ui}${LIGHT_PURPLE}]${PLAIN}"
     green "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
     yellow " 脚本快捷方式：hy2 (已自动配置，下次可在终端直接输入 hy2 启动)"
@@ -2176,7 +2036,6 @@ menu() {
 }
 
 while true; do
-    # 修复全局变量遗留导致的冲突污染
     firstport=""
     endport=""
     hy_domain=""
