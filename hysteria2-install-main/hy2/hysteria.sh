@@ -147,7 +147,7 @@ close_port() {
 }
 
 # =================================================================
-#  4. 环境检查与预处理 (升级: 引入 Nginx)
+#  4. 环境检查与预处理
 # =================================================================
 check_env() {
     clear
@@ -166,7 +166,6 @@ check_env() {
     yellow "  正在检查 Hysteria 2 核心及前置依赖包..."
     echo ""
     
-    # 【升级点】：加入 nginx 检查
     local cmds=("curl" "wget" "sudo" "ss" "iptables" "python3" "openssl" "socat" "qrencode" "jq" "sha256sum" "nginx")
     local missing=0
 
@@ -203,7 +202,6 @@ check_env() {
         
         [[ ! $SYSTEM == "CentOS" ]] && { $PKG_UPDATE || { echo ""; red " [错误] 系统软件源更新失败！请检查网络连接或更换软件源后重试。"; exit 1; }; }
         
-        # 【升级点】：所有系统的依赖安装都加入了 nginx
         if [[ $SYSTEM == "Alpine" ]]; then
             $PKG_INSTALL curl wget sudo procps iptables ip6tables iproute2 python3 openssl socat cronie libqrencode-tools jq coreutils nginx || { echo ""; red " [错误] 前置依赖安装失败！请检查系统源或网络后重试。"; exit 1; }
             rc-update add crond default 2>/dev/null; rc-service crond start 2>/dev/null
@@ -348,7 +346,6 @@ inst_cert() {
             local sys_cmd="/bin/systemctl"
             [[ ! -f "$sys_cmd" ]] && sys_cmd=$(command -v systemctl)
 
-            # 【升级点】续期后同步重启 Nginx 刷新证书
             if [[ $SYSTEM == "Alpine" ]]; then
                 local reload_cmd="cp -f /root/cert.crt /var/www/hysteria/certs/cert.crt && cp -f /root/private.key /var/www/hysteria/certs/private.key && chown -R root:root /var/www/hysteria/certs && (/sbin/rc-service hysteria-server restart || true) && (/sbin/rc-service nginx reload || true)"
             else
@@ -657,6 +654,7 @@ clean_env() {
     # 清理旧版 Python 订阅进程和 Nginx 订阅配置
     pkill -f "^python3 /var/www/hysteria/server.py$" 2>/dev/null || true
     rm -f /etc/nginx/conf.d/hysteria-sub.conf /etc/nginx/sites-available/hysteria-sub.conf /etc/nginx/sites-enabled/hysteria-sub.conf
+    rm -f /etc/nginx/http.d/hysteria-sub.conf 2>/dev/null
     if [[ $SYSTEM == "Alpine" ]]; then rc-service nginx reload 2>/dev/null; else systemctl reload nginx 2>/dev/null; fi
 
     if [[ $SYSTEM == "Alpine" ]]; then
@@ -809,14 +807,21 @@ EOF
     cp -L "$cert_path" "$sub_cert_dir/cert.crt" 2>/dev/null || cp -L /etc/hysteria/cert.crt "$sub_cert_dir/cert.crt"
     cp -L "$key_path" "$sub_cert_dir/private.key" 2>/dev/null || cp -L /etc/hysteria/private.key "$sub_cert_dir/private.key"
     
-    chown -R root:root "$sub_cert_dir"
-    chmod 400 "$sub_cert_dir/private.key"
+    chown -R root:root "$sub_cert_dir" 2>/dev/null
+    chmod 400 "$sub_cert_dir/private.key" 2>/dev/null
     chmod -R 755 "$web_dir"
 
-    local nginx_conf_dir="/etc/nginx/conf.d"
-    [[ $SYSTEM == "Ubuntu" || $SYSTEM == "Debian" ]] && nginx_conf_dir="/etc/nginx/sites-available"
-    
-    mkdir -p /etc/nginx/conf.d /etc/nginx/sites-available /etc/nginx/sites-enabled 2>/dev/null
+    # 1. 动态适配各类系统的 Nginx 配置目录
+    local nginx_conf_file="/etc/nginx/conf.d/hysteria-sub.conf"
+    if [[ $SYSTEM == "Ubuntu" || $SYSTEM == "Debian" ]]; then
+        mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled 2>/dev/null
+        nginx_conf_file="/etc/nginx/sites-available/hysteria-sub.conf"
+    elif [[ $SYSTEM == "Alpine" ]]; then
+        mkdir -p /etc/nginx/http.d 2>/dev/null
+        nginx_conf_file="/etc/nginx/http.d/hysteria-sub.conf"
+    else
+        mkdir -p /etc/nginx/conf.d 2>/dev/null
+    fi
     
     local ssl_config=""
     if [[ "${is_insecure_url}" == "0" && -f "$sub_cert_dir/cert.crt" && -f "$sub_cert_dir/private.key" ]]; then
@@ -826,24 +831,37 @@ EOF
     ssl_ciphers HIGH:!aNULL:!MD5;"
     fi
 
-    cat << EOF > /etc/nginx/conf.d/hysteria-sub.conf
+    # 2. 动态检测 IPv6 状态
+    local listen_ipv6=""
+    if [[ -f /proc/net/if_inet6 ]]; then
+        listen_ipv6="listen [::]:$sub_port $([[ -n "$ssl_config" ]] && echo "ssl");"
+    fi
+
+    # 3. Nginx 配置写入
+    cat << EOF > "$nginx_conf_file"
 server {
     listen $sub_port $([[ -n "$ssl_config" ]] && echo "ssl");
-    listen [::]:$sub_port $([[ -n "$ssl_config" ]] && echo "ssl");
+    $listen_ipv6
     
     $ssl_config
 
+    root $web_dir;
+
     location = /$sub_uuid {
-        alias $web_dir/$sub_uuid;
-        
         add_header Content-Type 'text/plain; charset=utf-8';
         add_header Cache-Control 'no-store, no-cache, must-revalidate, max-age=0';
         add_header profile-update-interval '24';
 
         if (\$http_user_agent ~* "(clash|meta|verge|stash|mihomo)") {
-            rewrite ^ /$sub_uuid/clash-meta-sub.yaml break;
+            rewrite ^ /$sub_uuid/clash-meta-sub.yaml last;
         }
-        rewrite ^ /$sub_uuid/sub_b64.txt break;
+        rewrite ^ /$sub_uuid/sub_b64.txt last;
+    }
+
+    location ~ ^/$sub_uuid/(clash-meta-sub\.yaml|sub_b64\.txt)$ {
+        add_header Content-Type 'text/plain; charset=utf-8';
+        add_header Cache-Control 'no-store, no-cache, must-revalidate, max-age=0';
+        add_header profile-update-interval '24';
     }
 
     location / {
@@ -853,8 +871,8 @@ server {
 EOF
 
     if [[ $SYSTEM == "Ubuntu" || $SYSTEM == "Debian" ]]; then
-        mv -f /etc/nginx/conf.d/hysteria-sub.conf /etc/nginx/sites-available/hysteria-sub.conf
         ln -sf /etc/nginx/sites-available/hysteria-sub.conf /etc/nginx/sites-enabled/
+        rm -f /etc/nginx/sites-enabled/default 2>/dev/null
     fi
 
     if nginx -t >/dev/null 2>&1; then
@@ -862,10 +880,11 @@ EOF
         if [[ $SYSTEM == "Alpine" ]]; then rc-service nginx restart 2>/dev/null; else systemctl restart nginx 2>/dev/null; fi
     else
         echo ""
-        red "  [警告] Nginx 配置测试失败，订阅服务可能无法正常启动！"
+        red "  [警告] Nginx 配置测试仍然失败！"
+        yellow "  [提示] 请手动执行 'nginx -t' 命令查看具体报错原因。"
     fi
     
-    # 清理掉老旧系统的 Python 服务残留
+    # 清理遗留的 Python 订阅服务
     svc_stop hysteria-sub 2>/dev/null
     svc_disable hysteria-sub 2>/dev/null
     rm -f /etc/systemd/system/hysteria-sub.service /etc/init.d/hysteria-sub
