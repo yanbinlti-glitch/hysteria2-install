@@ -1281,7 +1281,7 @@ edit_config() {
     echo ""
     print_line
     yellow "  [警告] 如果您在此处修改了 listen (主端口) 或通过系统修改了订阅端口，"
-    yellow "         脚本将无法自动更新系统的防火墙规则！修改后请务必自行放行新端口。"
+    yellow "          脚本将无法自动更新系统的防火墙规则！修改后请务必自行放行新端口。"
     print_line
     echo -en " ${LIGHT_YELLOW} ▶ 是否需要修改配置文件？(y/n) [默认: n]: ${PLAIN}"
     read edit_choice || exit 1
@@ -1405,7 +1405,7 @@ hysteriaswitch() {
     clear
     echo ""
     print_line
-    green "                     服务运行状态控制                      "
+    green "                      服务运行状态控制                      "
     print_line
     echo ""
     echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}启动 Hysteria 2 及订阅服务${PLAIN}"
@@ -1808,7 +1808,7 @@ config_outbound() {
             local acl_block="acl:\n  inline:\n    - reject(169.254.0.0/16)\n    - reject(::1/128)\n    - reject(127.0.0.0/8)\n    - reject(10.0.0.0/8)\n    - reject(172.16.0.0/12)\n    - reject(192.168.0.0/16)\n    - reject(fc00::/7)\n    - reject(fe80::/10)\n"
             
             if [[ "$route_mode" == 1 ]]; then
-                acl_block+="    - proxy(suffix:openai.com)\n    - proxy(suffix:chatgpt.com)\n    - proxy(suffix:anthropic.com)\n    - proxy(suffix:claude.ai)\n    - proxy(suffix:ai.ndai.top)\n    - proxy(suffix:netflix.com)\n    - proxy(suffix:nflxvideo.net)\n    - proxy(suffix:nflxext.com)\n    - proxy(suffix:nflxso.net)\n    - proxy(suffix:disneyplus.com)\n    - proxy(suffix:dssott.com)\n    - proxy(suffix:bamgrid.com)\n    - proxy(suffix:hulu.com)\n    - proxy(suffix:primevideo.com)\n    - proxy(suffix:amazon.video)\n    - proxy(suffix:googleusercontent.com/spotify.com/0)\n    - direct(all)"
+                acl_block+="    - proxy(suffix:openai.com)\n    - proxy(suffix:chatgpt.com)\n    - proxy(suffix:anthropic.com)\n    - proxy(suffix:claude.ai)\n    - proxy(suffix:ai.ndai.top)\n    - proxy(suffix:netflix.com)\n    - proxy(suffix:nflxvideo.net)\n    - proxy(suffix:nflxext.com)\n    - proxy(suffix:nflxso.net)\n    - proxy(suffix:disneyplus.com)\n    - proxy(suffix:dssott.com)\n    - proxy(suffix:bamgrid.com)\n    - proxy(suffix:hulu.com)\n    - proxy(suffix:primevideo.com)\n    - proxy(suffix:amazon.video)\n    - proxy(suffix:spotify.com)\n    - direct(all)"
             else
                 acl_block+="    - proxy(all)"
             fi
