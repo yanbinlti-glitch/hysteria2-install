@@ -719,9 +719,14 @@ generate_client_configs() {
     
     local clash_cert_verify="false"
     
-    if [[ "$is_insecure_url" == "0" && "$force_skip" == "0" ]]; then
-        clash_cert_verify="false"
+    if [[ "$is_insecure_url" == "0" ]]; then
+        # 【修复一】只要是真实的 CA 证书，必须返回域名让客户端拉取，避免被阻断 TLS 握手
         echo "$c_domain" > /etc/hysteria/sub_host.txt
+        if [[ "$force_skip" == "0" ]]; then
+            clash_cert_verify="false"
+        else
+            clash_cert_verify="true"
+        fi
     else
         clash_cert_verify="true"
         echo "$ip" > /etc/hysteria/sub_host.txt
@@ -766,7 +771,12 @@ generate_client_configs() {
     local url="hy2://$s_pwd@$uri_ip:$primary_port/?insecure=${is_insecure_url}&sni=$c_domain${mport_param}${obfs_param}#${safe_node_name}"
     echo "$url" > "$web_dir/$sub_uuid/url.txt"
     
-    printf "%s" "$url" | base64 -w 0 2>/dev/null > "$web_dir/$sub_uuid/sub_b64.txt" || printf "%s" "$url" | base64 | tr -d '\r\n' > "$web_dir/$sub_uuid/sub_b64.txt"
+    # 【修复二】安全生成 Base64，防止因特殊系统缺失参数而清空文件
+    local b64_str=$(printf "%s" "$url" | base64 -w 0 2>/dev/null)
+    if [[ -z "$b64_str" ]]; then
+        b64_str=$(printf "%s" "$url" | base64 | tr -d '\r\n')
+    fi
+    echo "$b64_str" > "$web_dir/$sub_uuid/sub_b64.txt"
 
     local sub_port=$(cat /etc/hysteria/sub_port.txt)
 
@@ -803,9 +813,8 @@ proxy-groups:
       - DIRECT
 
 rules:
-  # 【防死锁核心】强制服务器真实 IP 与订阅端口走本地直连网络，确保更新订阅永不超时
-  - IP-CIDR,$yaml_json_ip/32,DIRECT,no-resolve
-$([[ "$yaml_json_ip" == *":"* ]] && echo "  - IP-CIDR6,$yaml_json_ip/128,DIRECT,no-resolve")
+  # 【修复三】解决 IPv6 在 Clash 中的语法崩溃死锁问题
+$([[ "$yaml_json_ip" == *":"* ]] && echo "  - IP-CIDR6,$yaml_json_ip/128,DIRECT,no-resolve" || echo "  - IP-CIDR,$yaml_json_ip/32,DIRECT,no-resolve")
   - DST-PORT,$sub_port,DIRECT
   
   # 局域网与国内直连
