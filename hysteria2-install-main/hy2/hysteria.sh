@@ -246,7 +246,7 @@ inst_cert() {
     print_line
     echo ""
     echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}必应自签伪装证书 (单人独享/免域名，默认)${PLAIN}"
-    echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_PURPLE}Acme 脚本申请 (需 Cloudflare 域名托管)${PLAIN}"
+    echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_PURPLE}Acme 脚本申请 (支持 Cloudflare/阿里云/腾讯云)${PLAIN}"
     echo -e "    ${LIGHT_GREEN}[3]${PLAIN} ${LIGHT_YELLOW}自定义证书路径${PLAIN}"
     echo ""
     echo -en " ${LIGHT_YELLOW} ▶ 请输入选项 [1-3] (默认1): ${PLAIN}"
@@ -287,7 +287,7 @@ inst_cert() {
                 echo ""
                 yellow " [警告] 域名解析的 IP 列表 ($domainIPs) 中未完全匹配当前真实 IP ($ip)！"
                 yellow " [提示] 如果您的服务器是纯 IPv6 环境，这可能是由于 IPv6 缩写格式不一致导致的误报。"
-                yellow " [警告] Hysteria 2 必须使用真实 IP 直连，请确保 Cloudflare 已关闭小云朵 (DNS Only)。"
+                yellow " [警告] Hysteria 2 必须使用真实 IP 直连，请确保已关闭 CDN 小云朵 (DNS Only)。"
                 echo -en " ${LIGHT_YELLOW} ▶ 是否确认并继续？(y/n) [默认: y]: ${PLAIN}"
                 read force_cert || exit 1
                 [[ -z "$force_cert" ]] && force_cert="y"
@@ -296,12 +296,16 @@ inst_cert() {
 
             echo ""
             print_line
-            yellow "  准备使用 Cloudflare DNS API 申请证书"
+            yellow "  准备使用 DNS API 申请证书"
             print_line
             echo ""
-            echo -en " ${LIGHT_YELLOW} ▶ 选择认证方式 [1. API Token(推荐) | 2. Global API Key]: ${PLAIN}"
-            read cf_auth_choice || exit 1
-            [[ -z "$cf_auth_choice" ]] && cf_auth_choice=1
+            echo -e "    ${LIGHT_GREEN}[1]${PLAIN} ${LIGHT_GREEN}Cloudflare (推荐)${PLAIN}"
+            echo -e "    ${LIGHT_GREEN}[2]${PLAIN} ${LIGHT_PURPLE}阿里云 (Aliyun)${PLAIN}"
+            echo -e "    ${LIGHT_GREEN}[3]${PLAIN} ${LIGHT_YELLOW}腾讯云 (DNSPod)${PLAIN}"
+            echo ""
+            echo -en " ${LIGHT_YELLOW} ▶ 请选择您的域名托管商 [1-3] (默认1): ${PLAIN}"
+            read dns_provider || exit 1
+            [[ -z "$dns_provider" ]] && dns_provider=1
 
             install_acme() {
                 local acme_email="$1"
@@ -318,21 +322,33 @@ inst_cert() {
                 fi
             }
 
-            if [[ "$cf_auth_choice" == 1 ]]; then
+            local dns_api=""
+            if [[ "$dns_provider" == 1 ]]; then
                 echo -en " ${LIGHT_YELLOW} ▶ 请输入 Cloudflare API Token: ${PLAIN}"
                 read cf_token || exit 1
-                [[ -z "$cf_token" ]] && red " Token 不能为空！" && exit 1
                 export CF_Token="$(echo "$cf_token" | tr -d '\r' | tr -d ' ')"
+                dns_api="dns_cf"
+                install_acme "admin@${domain}"
+            elif [[ "$dns_provider" == 2 ]]; then
+                echo -en " ${LIGHT_YELLOW} ▶ 请输入阿里云 AccessKey ID: ${PLAIN}"
+                read ali_key || exit 1
+                echo -en " ${LIGHT_YELLOW} ▶ 请输入阿里云 AccessKey Secret: ${PLAIN}"
+                read ali_secret || exit 1
+                export Ali_Key="$(echo "$ali_key" | tr -d '\r' | tr -d ' ')"
+                export Ali_Secret="$(echo "$ali_secret" | tr -d '\r' | tr -d ' ')"
+                dns_api="dns_ali"
+                install_acme "admin@${domain}"
+            elif [[ "$dns_provider" == 3 ]]; then
+                echo -en " ${LIGHT_YELLOW} ▶ 请输入腾讯云/DNSPod ID: ${PLAIN}"
+                read dp_id || exit 1
+                echo -en " ${LIGHT_YELLOW} ▶ 请输入腾讯云/DNSPod Token: ${PLAIN}"
+                read dp_key || exit 1
+                export DP_Id="$(echo "$dp_id" | tr -d '\r' | tr -d ' ')"
+                export DP_Key="$(echo "$dp_key" | tr -d '\r' | tr -d ' ')"
+                dns_api="dns_dp"
                 install_acme "admin@${domain}"
             else
-                echo -en " ${LIGHT_YELLOW} ▶ 请输入 Cloudflare 账号邮箱: ${PLAIN}"
-                read cf_email || exit 1
-                echo -en " ${LIGHT_YELLOW} ▶ 请输入 Cloudflare Global API Key: ${PLAIN}"
-                read cf_key || exit 1
-                [[ -z "$cf_email" || -z "$cf_key" ]] && red " 邮箱或 Key 不能为空！" && exit 1
-                export CF_Email="$(echo "$cf_email" | tr -d '\r' | tr -d ' ')"
-                export CF_Key="$(echo "$cf_key" | tr -d '\r' | tr -d ' ')"
-                install_acme "$CF_Email"
+                red " [错误] 无效选项！" && exit 1
             fi
             
             bash /root/.acme.sh/acme.sh --upgrade --auto-upgrade
@@ -340,7 +356,7 @@ inst_cert() {
             rm -f /root/cert.crt /root/private.key /root/ca.log
 
             yellow " 正在通过 DNS API 验证所有权，请留意下方执行日志 (约1-3分钟)..."
-            bash /root/.acme.sh/acme.sh --issue --dns dns_cf -d "${domain}" -k ec-256 --dnssleep 20
+            bash /root/.acme.sh/acme.sh --issue --dns "$dns_api" -d "${domain}" -k ec-256 --dnssleep 20
             mkdir -p /var/www/hysteria/certs
 
             local sys_cmd="/bin/systemctl"
@@ -1186,7 +1202,13 @@ showconf() {
         echo -e "    ${LIGHT_RED}跳跃端口组: ${hop_ports} (UDP) - 必须放行整个范围！${PLAIN}"
     fi
     echo -e "    ${LIGHT_GREEN}云订阅端口: ${sub_port} (TCP)${PLAIN}"
-    echo -e "    ${LIGHT_PURPLE}若不开放上述云端防火墙，所有的订阅都将提示无效或超时！${PLAIN}"
+    echo -e "    ${LIGHT_PURPLE}====================================================${PLAIN}"
+    echo -e "    ${LIGHT_PURPLE}【自助排障技巧】${PLAIN}"
+    echo -e "    ${LIGHT_PURPLE}如果您发现在客户端里导入订阅失败，或者节点完全不通：${PLAIN}"
+    echo -e "    ${LIGHT_PURPLE}请在您的电脑浏览器中直接访问: http://${ip}:${sub_port}${PLAIN}"
+    echo -e "    ${LIGHT_PURPLE}如果网页显示 '403 Forbidden' 或乱码，说明网络畅通！${PLAIN}"
+    echo -e "    ${LIGHT_PURPLE}如果网页一直转圈打不开，100% 是您的云控制台防火墙没开！${PLAIN}"
+    echo -e "    ${LIGHT_PURPLE}====================================================${PLAIN}"
     echo ""
     echo -en " ${LIGHT_YELLOW} ▶ 按回车键返回主菜单... ${PLAIN}"
     read temp
@@ -2076,7 +2098,8 @@ server_status_check() {
                 echo ""
                 if [[ -n "$main_port" ]]; then
                     if ss -unl | grep -E -q "(:|^)$main_port( |$)"; then
-                        green "  [✔] UDP 端口 $main_port 监听正常！"
+                        green "  [✔] UDP 端口 $main_port 监听正常！(仅代表系统内部服务已启动)"
+                        yellow "  [⚠] 请务必确保云服务商控制台 (如安全组) 已放行 UDP $main_port 端口！"
                     else
                         red "  [✘] UDP 端口 $main_port 未被监听！(可能会导致客户端连不上)"
                     fi
@@ -2121,7 +2144,8 @@ server_status_check() {
                 echo ""
                 if [[ -n "$sub_port" ]]; then
                     if ss -tnl | grep -E -q "(:|^)$sub_port( |$)"; then
-                        green "  [✔] TCP 端口 $sub_port 监听正常！"
+                        green "  [✔] TCP 端口 $sub_port 监听正常！(仅代表内部 Nginx 已启动)"
+                        yellow "  [⚠] 如果外部拉取订阅失败，请去云端安全组放行 TCP $sub_port 端口！"
                     else
                         red "  [✘] TCP 端口 $sub_port 未被监听！(会导致您的订阅链接无法拉取)"
                     fi
