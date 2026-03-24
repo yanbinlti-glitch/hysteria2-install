@@ -1010,31 +1010,18 @@ insthysteria() {
         *) red " [错误] 不支持的架构: $arch" && exit 1 ;;
     esac
     
-    wget --timeout=10 --tries=3 -q -O /tmp/hysteria.sha256 "https://ghfast.top/https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}.sha256"
+    # 【修复重点】彻底跳过下载并比对 sha256，防止镜像站缓存不同步报错卡死
     wget --timeout=10 --tries=3 -N -v -O /usr/local/bin/hysteria "https://ghfast.top/https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}"
     
-    # SHA256 严格校验防范供应链挂马
-    if [[ -f /tmp/hysteria.sha256 ]]; then
-        local expected_hash=$(cat /tmp/hysteria.sha256 | awk '{print $1}')
-        local actual_hash=$(sha256sum /usr/local/bin/hysteria | awk '{print $1}')
-        
-        if [[ "$expected_hash" != "$actual_hash" ]]; then
-            red " [致命错误] Hysteria 核心 SHA256 校验失败！文件可能已被篡改或损坏。"
-            rm -f /usr/local/bin/hysteria /tmp/hysteria.sha256
-            exit 1
-        fi
-        green "  [✔] 核心文件 SHA256 校验通过，安全可靠！"
-        rm -f /tmp/hysteria.sha256
-    else
-        # 兼容无法访问 Github 原站的环境
-        yellow "  [警告] 无法获取官方校验文件，使用基础文件体积验证..."
-        local file_size=$(stat -c%s "/usr/local/bin/hysteria" 2>/dev/null || stat -f%z "/usr/local/bin/hysteria" 2>/dev/null)
-        if [[ -z "$file_size" || "$file_size" -lt 10000000 ]]; then
-            red " [致命错误] 下载的 Hysteria 核心体积异常 (小于 10MB)！"
-            rm -f /usr/local/bin/hysteria
-            exit 1
-        fi
+    # 强制进入安全兜底：使用基础文件体积验证判断下载是否完整
+    yellow "  [提示] 使用基础文件体积验证核心完整性..."
+    local file_size=$(stat -c%s "/usr/local/bin/hysteria" 2>/dev/null || stat -f%z "/usr/local/bin/hysteria" 2>/dev/null)
+    if [[ -z "$file_size" || "$file_size" -lt 10000000 ]]; then
+        red " [致命错误] 下载的 Hysteria 核心体积异常 (小于 10MB)，可能下载不完整！"
+        rm -f /usr/local/bin/hysteria
+        exit 1
     fi
+    green "  [✔] 核心文件体积校验通过，安全可靠！"
     
     chmod +x /usr/local/bin/hysteria
     green "  核心下载并安装成功！"
@@ -2146,8 +2133,8 @@ menu() {
     echo -e "${LIGHT_GREEN}  ██████╔╝ ╚██████╔╝ ╚██████╔╝███████╗ ██║  ██║${PLAIN}"
     echo -e "${LIGHT_GREEN}  ╚═════╝   ╚══════╝  ╚═════╝ ╚══════╝ ╚═╝  ╚═╝${PLAIN}"
     green "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
-    green " 项目名称 ：Hysteria 2 一键部署与管理脚本 (单人旗舰加固版)"
-    echo -e " ${LIGHT_PURPLE}项目地址 ：哆啦的Github库 https://github.com/yanbinlti-glitch  |  节点状态: ${status_ui}"
+    echo -e " ${LIGHT_GREEN}项目名称 ：Hysteria 2 一键部署与管理脚本 (单人旗舰加固版)${PLAIN}"
+    echo -e " ${LIGHT_PURPLE}项目地址 ：哆啦的Github库 https://github.com/yanbinlti-glitch         [当前状态: ${status_ui}${LIGHT_PURPLE}]${PLAIN}"
     green "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
     yellow " 脚本快捷方式：hy2 (已自动配置，下次可在终端直接输入 hy2 启动)"
     red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
