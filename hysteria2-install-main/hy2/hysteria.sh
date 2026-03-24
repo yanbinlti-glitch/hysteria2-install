@@ -69,7 +69,6 @@ fi
 
 PUBLIC_IP=""
 realip() {
-    # 修复：增加 IP 缓存机制，防止频繁请求外部 API 导致限流封锁
     if [[ -n "$PUBLIC_IP" && "$PUBLIC_IP" != *.* && "$PUBLIC_IP" != *:* ]]; then
         ip="$PUBLIC_IP"
         return
@@ -102,7 +101,6 @@ svc_stop()    { if [[ $SYSTEM == "Alpine" ]]; then rc-service "$1" stop; else sy
 svc_enable()  { if [[ $SYSTEM == "Alpine" ]]; then rc-update add "$1" default; else systemctl enable "$1"; fi; }
 svc_disable() { if [[ $SYSTEM == "Alpine" ]]; then rc-update del "$1" default; else systemctl disable "$1"; fi; }
 
-# 修复：统合守护进程状态检查函数，精简冗余代码
 is_svc_active() {
     if [[ $SYSTEM == "Alpine" ]]; then
         rc-service "$1" status 2>/dev/null | grep -q 'started'
@@ -153,7 +151,6 @@ close_port() {
     elif command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
         ufw delete allow $port/$proto 2>/dev/null
     else
-        # 修复：添加最大清理次数限制，防止特殊内核环境下的死循环
         local count=0
         while iptables -D INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null; do
             count=$((count+1)); [[ $count -ge 15 ]] && break
@@ -345,7 +342,6 @@ inst_cert() {
             local dns_api=""
             local acme_cmd_prefix=""
             
-            # 修复：确保敏感的 Token 环境变量在执行 acme.sh 时绝对生效 (防御 sudo 环境丢失)
             if [[ "$dns_provider" == 1 ]]; then
                 echo -en " ${LIGHT_YELLOW} ▶ 请输入 Cloudflare API Token: ${PLAIN}"
                 read cf_token || exit 1
@@ -579,7 +575,6 @@ inst_other_configs() {
     yellow "  订阅链接 UUID 设置"
     local current_uuid=""
     if [[ -f /root/.hy2_sub_uuid ]]; then
-        # 修复：确保读取出的老版 UUID 没有引入特殊危险字符
         current_uuid=$(cat /root/.hy2_sub_uuid | tr -d '\r' | LC_ALL=C tr -dc 'a-zA-Z0-9')
     else
         current_uuid=$(echo "${ip}-Hysteria2-Sub" | md5sum | head -c 16)
@@ -601,7 +596,6 @@ inst_other_configs() {
     green " 连接密码为: $auth_pwd"
 
     echo ""
-    # 修复：为伪装站点提供高质量备选项，增强安全与抗封锁能力
     yellow " ▶ 伪装网站地址选择 (建议使用大型通用网站以防 SNI 阻断)"
     echo -e "   ${LIGHT_GREEN}[1]${PLAIN} www.bing.com (推荐, 默认)"
     echo -e "   ${LIGHT_GREEN}[2]${PLAIN} www.apple.com"
@@ -704,7 +698,6 @@ clean_env() {
     if [[ -f /etc/hysteria/.firewall_state ]]; then
         while IFS=: read -r c_proto c_port c_endport; do
             if [[ -n "$c_endport" ]]; then
-                # 修复：清理时同样引入次数上限防御死循环
                 local count=0
                 while iptables -D INPUT -p "$c_proto" --dport "$c_port:$c_endport" -j ACCEPT 2>/dev/null; do count=$((count+1)); [[ $count -ge 15 ]] && break; done
                 count=0
@@ -821,7 +814,6 @@ generate_client_configs() {
     local web_dir="/var/www/hysteria"
     mkdir -p "$web_dir"
 
-    # 修复：防止二次生成订阅目录时包含脏字符
     local sub_uuid=$(cat /root/.hy2_sub_uuid 2>/dev/null | LC_ALL=C tr -dc 'a-zA-Z0-9')
     [[ -z "$sub_uuid" ]] && sub_uuid=$(echo "${ip}-Hysteria2-Sub" | md5sum | head -c 16)
     echo "$sub_uuid" > /etc/hysteria/sub_path.txt
@@ -1061,7 +1053,6 @@ EOF
     fi
     echo "$cert_insecure_url" > /etc/hysteria/insecure_state.txt
 
-    # 修复：写入更安全的标识符锚点，以便后续修改路由不至于弄坏 YAML 文件
     cat << EOF > /etc/hysteria/config.yaml
 listen: :$port
 
@@ -1693,12 +1684,12 @@ config_outbound() {
         sleep 2; return
     fi
 
-    if grep -q "^outbound" /etc/hysteria/config.yaml; then
-        local current_type=$(awk '/^outbound/,0' /etc/hysteria/config.yaml | grep "type:" | head -n 1 | awk '{print $2}' | tr -d '\r')
+    if grep -q "^outbound:" /etc/hysteria/config.yaml; then
+        local current_type=$(awk '/^outbound:/,0' /etc/hysteria/config.yaml | grep "type:" | head -n 1 | awk '{print $2}' | tr -d '\r')
         local route_mode_str="未知/自定义"
         if grep -q "proxy(all)" /etc/hysteria/config.yaml; then
             route_mode_str="全局代理"
-        elif grep -q "proxy(suffix:netflix.com)" /etc/hysteria/config.yaml; then
+        elif grep -q "proxy(domain:netflix.com)" /etc/hysteria/config.yaml; then
             route_mode_str="智能分流 (AI+流媒体)"
         fi
         
@@ -1706,9 +1697,9 @@ config_outbound() {
         
         local current_addr=""
         if [[ "$current_type" == "socks5" ]]; then
-            current_addr=$(awk '/^outbound/,0' /etc/hysteria/config.yaml | grep "addr:" | head -n 1 | awk '{print $2}' | tr -d '\r')
+            current_addr=$(awk '/^outbound:/,0' /etc/hysteria/config.yaml | grep "addr:" | head -n 1 | awk '{print $2}' | tr -d '\r')
         elif [[ "$current_type" == "http" ]]; then
-            current_addr=$(awk '/^outbound/,0' /etc/hysteria/config.yaml | grep "url:" | head -n 1 | awk '{print $2}' | tr -d '\r')
+            current_addr=$(awk '/^outbound:/,0' /etc/hysteria/config.yaml | grep "url:" | head -n 1 | awk '{print $2}' | tr -d '\r' | tr -d '"')
         fi
         [[ -n "$current_addr" ]] && green "  当前代理地址: $current_addr"
     else
@@ -1808,25 +1799,24 @@ config_outbound() {
             local acl_block="acl:\n  inline:\n    - reject(169.254.0.0/16)\n    - reject(::1/128)\n    - reject(127.0.0.0/8)\n    - reject(10.0.0.0/8)\n    - reject(172.16.0.0/12)\n    - reject(192.168.0.0/16)\n    - reject(fc00::/7)\n    - reject(fe80::/10)\n"
             
             if [[ "$route_mode" == 1 ]]; then
-                acl_block+="    - proxy(suffix:openai.com)\n    - proxy(suffix:chatgpt.com)\n    - proxy(suffix:anthropic.com)\n    - proxy(suffix:claude.ai)\n    - proxy(suffix:ai.ndai.top)\n    - proxy(suffix:netflix.com)\n    - proxy(suffix:nflxvideo.net)\n    - proxy(suffix:nflxext.com)\n    - proxy(suffix:nflxso.net)\n    - proxy(suffix:disneyplus.com)\n    - proxy(suffix:dssott.com)\n    - proxy(suffix:bamgrid.com)\n    - proxy(suffix:hulu.com)\n    - proxy(suffix:primevideo.com)\n    - proxy(suffix:amazon.video)\n    - proxy(suffix:spotify.com)\n    - direct(all)"
+                acl_block+="    - proxy(domain:openai.com)\n    - proxy(domain:chatgpt.com)\n    - proxy(domain:anthropic.com)\n    - proxy(domain:claude.ai)\n    - proxy(domain:ai.ndai.top)\n    - proxy(domain:netflix.com)\n    - proxy(domain:nflxvideo.net)\n    - proxy(domain:nflxext.com)\n    - proxy(domain:nflxso.net)\n    - proxy(domain:disneyplus.com)\n    - proxy(domain:dssott.com)\n    - proxy(domain:bamgrid.com)\n    - proxy(domain:hulu.com)\n    - proxy(domain:primevideo.com)\n    - proxy(domain:amazon.video)\n    - proxy(domain:spotify.com)\n    - direct(all)"
             else
                 acl_block+="    - proxy(all)"
             fi
 
-            local out_block="outbounds:\n  - name: proxy\n"
+            local out_block="outbound:\n"
             if [[ "$out_type" == "socks5" ]]; then
                 local safe_user=$(echo "$out_user" | sed "s/'/''/g")
                 local safe_pass=$(echo "$out_pass" | sed "s/'/''/g")
                 
-                out_block+="    type: socks5\n    socks5:\n      addr: $out_addr\n"
-                [[ -n "$out_user" ]] && out_block+="      username: '${safe_user}'\n      password: '${safe_pass}'\n"
+                out_block+="  type: socks5\n  socks5:\n    addr: $out_addr\n"
+                [[ -n "$out_user" ]] && out_block+="    username: '${safe_user}'\n    password: '${safe_pass}'\n"
             else
-                out_block+="    type: http\n    http:\n      url: $proxy_uri\n"
+                out_block+="  type: http\n  http:\n    url: \"$proxy_uri\"\n"
             fi
 
             cp -f /etc/hysteria/config.yaml /etc/hysteria/config.yaml.bak
 
-            # 修复：使用全新重写的 Python 解析逻辑，强依赖路由锚点替换，告别正则表达式误删 Bug
             local tmp_editor=$(mktemp /tmp/hy2_yaml_editor.XXXXXX.py)
             cat << 'EOF' > "$tmp_editor"
 import sys
@@ -1847,7 +1837,6 @@ if marker_start in content and marker_end in content:
     pattern = re.compile(r'# --- ROUTING_START ---.*?# --- ROUTING_END ---', re.DOTALL)
     new_content = pattern.sub(new_routing, content)
 else:
-    # 兼容没有添加锚点的旧版配置，安全擦除并附加
     lines = content.split('\n')
     cleaned_lines = []
     skip = False
@@ -1946,23 +1935,24 @@ EOF
             echo ""
             print_line
             yellow "  ▶ 正在检查落地代理运行与健康状态..."
-            if ! grep -q "^outbound" /etc/hysteria/config.yaml; then
+            if ! grep -q "^outbound:" /etc/hysteria/config.yaml; then
                 red "  当前未开启落地代理，正在使用本机原生直连。"
             else
-                local current_type=$(awk '/^outbound/,0' /etc/hysteria/config.yaml | grep "type:" | head -n 1 | awk '{print $2}' | tr -d '\r')
+                local current_type=$(awk '/^outbound:/,0' /etc/hysteria/config.yaml | grep "type:" | head -n 1 | awk '{print $2}' | tr -d '\r')
                 local curl_proxy=""
                 
                 if [[ "$current_type" == "socks5" ]]; then
-                    local s_addr=$(awk '/^outbound/,0' /etc/hysteria/config.yaml | grep "addr:" | head -n 1 | awk '{print $2}' | tr -d '\r')
-                    local s_user=$(awk '/^outbound/,0' /etc/hysteria/config.yaml | grep "username:" | head -n 1 | awk '{print $2}' | tr -d '\r' | tr -d "'")
-                    local s_pass=$(awk '/^outbound/,0' /etc/hysteria/config.yaml | grep "password:" | head -n 1 | awk '{print $2}' | tr -d '\r' | tr -d "'")
+                    local s_addr=$(awk '/^outbound:/,0' /etc/hysteria/config.yaml | grep "addr:" | head -n 1 | awk '{print $2}' | tr -d '\r')
+                    local s_user=$(awk '/^outbound:/,0' /etc/hysteria/config.yaml | grep "username:" | head -n 1 | sed 's/^[[:space:]]*username:[[:space:]]*//' | tr -d '\r' | tr -d "'")
+                    local s_pass=$(awk '/^outbound:/,0' /etc/hysteria/config.yaml | grep "password:" | head -n 1 | sed 's/^[[:space:]]*password:[[:space:]]*//' | tr -d '\r' | tr -d "'")
+                    
                     if [[ -n "$s_user" ]]; then
-                        curl_proxy="socks5h://${s_user}:${s_pass}@${s_addr}"
+                        curl_proxy=$(USER="$s_user" PASS="$s_pass" ADDR="$s_addr" python3 -c "import os, urllib.parse; print('socks5h://' + urllib.parse.quote(os.environ.get('USER', '')) + ':' + urllib.parse.quote(os.environ.get('PASS', '')) + '@' + os.environ.get('ADDR', ''))")
                     else
                         curl_proxy="socks5h://${s_addr}"
                     fi
                 elif [[ "$current_type" == "http" ]]; then
-                    curl_proxy=$(awk '/^outbound/,0' /etc/hysteria/config.yaml | grep "url:" | head -n 1 | awk '{print $2}' | tr -d '\r')
+                    curl_proxy=$(awk '/^outbound:/,0' /etc/hysteria/config.yaml | grep "url:" | head -n 1 | sed 's/^[[:space:]]*url:[[:space:]]*//' | tr -d '\r' | tr -d '"')
                 fi
 
                 echo ""
