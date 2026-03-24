@@ -71,16 +71,15 @@ fi
 
 realip() {
     ip=""
-    # 修复 IPv6-Only 假死: 更严谨的 IPv4 路由预判
     if ip -4 addr show scope global 2>/dev/null | grep -q 'inet '; then
         ip=$(curl -s4m3 api.ipify.org -k || curl -s4m3 ifconfig.me -k || curl -s4m3 ip.sb -k)
     fi
     if [[ -z "$ip" ]]; then
         ip=$(curl -s6m3 api64.ipify.org -k || curl -s6m3 ifconfig.me -k || curl -s6m3 ip.sb -k)
     fi
-    # 修复 IPv6 零压缩正则匹配盲区与乱码混淆
-    ip=$(echo "$ip" | grep -m 1 -E -o "([0-9]{1,3}\.){3}[0-9]{1,3}|([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}")
-    if [[ -z "$ip" ]]; then
+    
+    # 丢弃脆弱的正则，使用基础字符验证来防御空值和非法返回
+    if [[ "$ip" != *.* && "$ip" != *:* ]]; then
         echo ""
         red " [错误] 无法获取本机的公网 IP，请检查 VPS 的网络连接或 DNS 设置！"
         exit 1
@@ -118,33 +117,36 @@ save_iptables() {
 open_port() {
     local port=$1
     local proto=$2
-    # 记录防火墙状态，防止卸载时产生幽灵规则
     mkdir -p /etc/hysteria
     echo "$proto:$port" >> /etc/hysteria/.firewall_state
     
-    # 移除 -m comment 防止极简内核报错
-    iptables -I INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null
-    ip6tables -I INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null
-    if command -v ufw >/dev/null; then ufw allow $port/$proto 2>/dev/null; fi
+    # 互斥判断：优先 Firewalld，其次 UFW，最后 iptables
     if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
         firewall-cmd --zone=public --add-port=$port/$proto --permanent 2>/dev/null
         firewall-cmd --reload 2>/dev/null
+    elif command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
+        ufw allow $port/$proto 2>/dev/null
+    else
+        iptables -I INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null
+        ip6tables -I INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null
+        save_iptables
     fi
-    save_iptables
 }
 
 close_port() {
     local port=$1
     local proto=$2
-    # while 循环彻底清空同名废弃规则
-    while iptables -D INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null; do :; done
-    while ip6tables -D INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null; do :; done
-    if command -v ufw >/dev/null; then ufw delete allow $port/$proto 2>/dev/null; fi
+    
     if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
         firewall-cmd --zone=public --remove-port=$port/$proto --permanent 2>/dev/null
         firewall-cmd --reload 2>/dev/null
+    elif command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
+        ufw delete allow $port/$proto 2>/dev/null
+    else
+        while iptables -D INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null; do :; done
+        while ip6tables -D INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null; do :; done
+        save_iptables
     fi
-    save_iptables
 }
 
 # =================================================================
@@ -168,7 +170,7 @@ check_env() {
     yellow "  正在检查 Hysteria 2 核心及前置依赖包..."
     echo ""
     
-    local cmds=("curl" "wget" "sudo" "ss" "iptables" "python3" "openssl" "socat" "qrencode" "jq")
+    local cmds=("curl" "wget" "sudo" "ss" "iptables" "python3" "openssl" "socat" "qrencode" "jq" "sha256sum")
     local missing=0
 
     for cmd in "${cmds[@]}"; do
@@ -205,11 +207,11 @@ check_env() {
         [[ ! $SYSTEM == "CentOS" ]] && { $PKG_UPDATE || { echo ""; red " [错误] 系统软件源更新失败！请检查网络连接或更换软件源后重试。"; exit 1; }; }
         
         if [[ $SYSTEM == "Alpine" ]]; then
-            $PKG_INSTALL curl wget sudo procps iptables ip6tables iproute2 python3 openssl socat cronie libqrencode-tools jq || { echo ""; red " [错误] 前置依赖安装失败！请检查系统源或网络后重试。"; exit 1; }
+            $PKG_INSTALL curl wget sudo procps iptables ip6tables iproute2 python3 openssl socat cronie libqrencode-tools jq coreutils || { echo ""; red " [错误] 前置依赖安装失败！请检查系统源或网络后重试。"; exit 1; }
             rc-update add crond default 2>/dev/null; rc-service crond start 2>/dev/null
         elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" || $SYSTEM == "Alma" || $SYSTEM == "Rocky" ]]; then
             $PKG_INSTALL epel-release || { echo ""; red " [错误] epel-release 扩展源安装失败！"; exit 1; }
-            $PKG_INSTALL curl wget sudo procps iptables iptables-services iproute python3 openssl socat cronie qrencode jq || { echo ""; red " [错误] 前置依赖安装失败！请检查系统源或网络后重试。"; exit 1; }
+            $PKG_INSTALL curl wget sudo procps iptables iptables-services iproute python3 openssl socat cronie qrencode jq coreutils || { echo ""; red " [错误] 前置依赖安装失败！请检查系统源或网络后重试。"; exit 1; }
             systemctl enable --now crond 2>/dev/null || systemctl enable --now cron 2>/dev/null
         else
             # 增加 APT 锁等待防打断
@@ -224,7 +226,7 @@ check_env() {
             apt-get --fix-broken -y install || { echo ""; red " [错误] 尝试修复系统损坏的依赖项失败！"; exit 1; }
             apt-get autoremove -y
             apt-get clean
-            apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" -y install curl wget sudo procps iptables-persistent netfilter-persistent iproute2 python3 openssl socat cron qrencode jq || { echo ""; red " [错误] 前置依赖安装失败！请检查 APT 源或网络后重试。"; exit 1; }
+            apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" -y install curl wget sudo procps iptables-persistent netfilter-persistent iproute2 python3 openssl socat cron qrencode jq coreutils || { echo ""; red " [错误] 前置依赖安装失败！请检查 APT 源或网络后重试。"; exit 1; }
             systemctl enable --now cron 2>/dev/null || systemctl enable --now crond 2>/dev/null
         fi
         
@@ -842,6 +844,7 @@ import ssl
 import os
 import urllib.parse
 import socket
+import errno
 
 # 修复 Slowloris 线程假死漏洞
 socket.setdefaulttimeout(10)
@@ -864,6 +867,12 @@ class SecureSubHandler(http.server.BaseHTTPRequestHandler):
     def handle(self):
         try:
             super().handle()
+        except socket.timeout:
+            pass
+        except socket.error as e:
+            # 忽略由客户端强行断开引起的 Broken pipe 和 Connection reset by peer 报错
+            if e.errno not in (errno.EPIPE, errno.ECONNRESET):
+                pass
         except Exception:
             pass
 
@@ -1001,27 +1010,37 @@ insthysteria() {
         *) red " [错误] 不支持的架构: $arch" && exit 1 ;;
     esac
     
+    # 下载官方的 SHA256 校验文件
+    wget --timeout=10 --tries=3 -q -O /tmp/hysteria.sha256 "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}.sha256"
+    
     # 更换为更稳定的 fallback 下载源
-    wget --timeout=10 --tries=3 -N -v -O /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}" || \
     wget --timeout=10 --tries=3 -N -v -O /usr/local/bin/hysteria "https://ghfast.top/https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${hy_arch}"
     
-    # 【修复核心供应链风险】加入二进制强校验，防止 Github 镜像代理返回 502 报错 HTML 导致假下载挂马
-    if [[ ! -s /usr/local/bin/hysteria ]]; then
-        red " [错误] 核心拉取失败，请检查网络！"
-        rm -f /usr/local/bin/hysteria
-        exit 1
-    fi
-    
-    local file_size=$(stat -c%s "/usr/local/bin/hysteria" 2>/dev/null || stat -f%z "/usr/local/bin/hysteria" 2>/dev/null)
-    if [[ "$file_size" -lt 10000000 ]]; then
-        red " [致命错误] 下载的 Hysteria 核心体积异常 (小于 10MB)！"
-        yellow " 您的网络可能被劫持或镜像源正在维护，返回了无效的 HTML 页面。"
-        rm -f /usr/local/bin/hysteria
-        exit 1
+    # SHA256 严格校验防范供应链挂马
+    if [[ -f /tmp/hysteria.sha256 ]]; then
+        local expected_hash=$(cat /tmp/hysteria.sha256 | awk '{print $1}')
+        local actual_hash=$(sha256sum /usr/local/bin/hysteria | awk '{print $1}')
+        
+        if [[ "$expected_hash" != "$actual_hash" ]]; then
+            red " [致命错误] Hysteria 核心 SHA256 校验失败！文件可能已被篡改或损坏。"
+            rm -f /usr/local/bin/hysteria /tmp/hysteria.sha256
+            exit 1
+        fi
+        green "  [✔] 核心文件 SHA256 校验通过，安全可靠！"
+        rm -f /tmp/hysteria.sha256
+    else
+        # 兼容无法访问 Github 原站的环境
+        yellow "  [警告] 无法获取官方校验文件，使用基础文件体积验证..."
+        local file_size=$(stat -c%s "/usr/local/bin/hysteria" 2>/dev/null || stat -f%z "/usr/local/bin/hysteria" 2>/dev/null)
+        if [[ -z "$file_size" || "$file_size" -lt 10000000 ]]; then
+            red " [致命错误] 下载的 Hysteria 核心体积异常 (小于 10MB)！"
+            rm -f /usr/local/bin/hysteria
+            exit 1
+        fi
     fi
     
     chmod +x /usr/local/bin/hysteria
-    green "  核心下载并校验成功！"
+    green "  核心下载并安装成功！"
     
     if [[ $SYSTEM == "Alpine" ]]; then
         cat << 'EOF' > /etc/init.d/hysteria-server
@@ -1851,7 +1870,7 @@ config_outbound() {
             
             # 【修复致命语法残留】去除了非法的 http:// 路径前缀，使其完全符合 Hysteria 2 ACL 规则
             if [[ "$route_mode" == 1 ]]; then
-                acl_block+="    - proxy(suffix:openai.com)\n    - proxy(suffix:chatgpt.com)\n    - proxy(suffix:anthropic.com)\n    - proxy(suffix:claude.ai)\n    - proxy(suffix:ai.ndai.top)\n    - proxy(suffix:netflix.com)\n    - proxy(suffix:nflxvideo.net)\n    - proxy(suffix:nflxext.com)\n    - proxy(suffix:nflxso.net)\n    - proxy(suffix:disneyplus.com)\n    - proxy(suffix:dssott.com)\n    - proxy(suffix:bamgrid.com)\n    - proxy(suffix:hulu.com)\n    - proxy(suffix:primevideo.com)\n    - proxy(suffix:amazon.video)\n    - proxy(suffix:spotify.com)\n    - direct(all)"
+                acl_block+="    - proxy(suffix:openai.com)\n    - proxy(suffix:chatgpt.com)\n    - proxy(suffix:anthropic.com)\n    - proxy(suffix:claude.ai)\n    - proxy(suffix:ai.ndai.top)\n    - proxy(suffix:netflix.com)\n    - proxy(suffix:nflxvideo.net)\n    - proxy(suffix:nflxext.com)\n    - proxy(suffix:nflxso.net)\n    - proxy(suffix:disneyplus.com)\n    - proxy(suffix:dssott.com)\n    - proxy(suffix:bamgrid.com)\n    - proxy(suffix:hulu.com)\n    - proxy(suffix:primevideo.com)\n    - proxy(suffix:amazon.video)\n    - proxy(suffix:googleusercontent.com/spotify.com/0)\n    - direct(all)"
             else
                 acl_block+="    - proxy(all)"
             fi
@@ -1873,23 +1892,26 @@ config_outbound() {
             local tmp_editor=$(mktemp /tmp/hy2_yaml_editor.XXXXXX.py)
             cat << 'EOF' > "$tmp_editor"
 import sys
+import re
 
 with open('/etc/hysteria/config.yaml', 'r') as f:
-    lines = f.read().split('\n')
+    lines = f.readlines()
 
 new_lines = []
 skip = False
 for line in lines:
-    if line.startswith('acl:') or line.startswith('outbounds:') or line.startswith('outbound:'):
+    if re.match(r'^(acl|outbound|outbounds):', line):
         skip = True
         continue
+        
     if skip:
-        if line.strip() and not line.startswith(' ') and not line.startswith('#'):
+        if line.strip() and not re.match(r'^\s', line) and not line.startswith('#'):
             skip = False
         else:
             continue
+            
     if not skip:
-        new_lines.append(line)
+        new_lines.append(line.rstrip('\n'))
 
 new_content = '\n'.join(new_lines).strip()
 new_content += '\n\n' + sys.argv[1].replace('\\n', '\n')
@@ -1929,23 +1951,30 @@ EOF
             local tmp_editor=$(mktemp /tmp/hy2_yaml_editor.XXXXXX.py)
             cat << 'EOF' > "$tmp_editor"
 import sys
+import re
+
 with open('/etc/hysteria/config.yaml', 'r') as f:
-    lines = f.read().split('\n')
+    lines = f.readlines()
+
 new_lines = []
 skip = False
 for line in lines:
-    if line.startswith('acl:') or line.startswith('outbounds:') or line.startswith('outbound:'):
+    if re.match(r'^(acl|outbound|outbounds):', line):
         skip = True
         continue
+        
     if skip:
-        if line.strip() and not line.startswith(' ') and not line.startswith('#'):
+        if line.strip() and not re.match(r'^\s', line) and not line.startswith('#'):
             skip = False
         else:
             continue
+            
     if not skip:
-        new_lines.append(line)
+        new_lines.append(line.rstrip('\n'))
+
 new_content = '\n'.join(new_lines).strip()
 new_content += '\n\n' + sys.argv[1].replace('\\n', '\n')
+
 with open('/etc/hysteria/config.yaml', 'w') as f:
     f.write(new_content + '\n')
 EOF
