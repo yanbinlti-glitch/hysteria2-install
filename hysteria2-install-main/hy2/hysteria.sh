@@ -111,14 +111,14 @@ is_svc_active() {
 
 save_iptables() {
     if [[ $SYSTEM == "Alpine" ]]; then
-        rc-service iptables save 2>/dev/null
-        rc-service ip6tables save 2>/dev/null
+        rc-service iptables save
+        rc-service ip6tables save
     elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" || $SYSTEM == "Alma" || $SYSTEM == "Rocky" ]]; then
-        service iptables save 2>/dev/null
-        service ip6tables save 2>/dev/null
+        service iptables save
+        service ip6tables save
     else
         if command -v netfilter-persistent >/dev/null; then
-            netfilter-persistent save 2>/dev/null
+            netfilter-persistent save
         fi
     fi
 }
@@ -130,13 +130,13 @@ open_port() {
     echo "$proto:$port" >> /etc/hysteria/.firewall_state
     
     if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
-        firewall-cmd --zone=public --add-port=$port/$proto --permanent 2>/dev/null
-        firewall-cmd --reload 2>/dev/null
+        firewall-cmd --zone=public --add-port=$port/$proto --permanent
+        firewall-cmd --reload
     elif command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
-        ufw allow $port/$proto 2>/dev/null
+        ufw allow $port/$proto
     else
-        iptables -I INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null
-        ip6tables -I INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null
+        iptables -I INPUT -p $proto --dport $port -j ACCEPT
+        ip6tables -I INPUT -p $proto --dport $port -j ACCEPT
         save_iptables
     fi
 }
@@ -146,10 +146,10 @@ close_port() {
     local proto=$2
     
     if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
-        firewall-cmd --zone=public --remove-port=$port/$proto --permanent 2>/dev/null
-        firewall-cmd --reload 2>/dev/null
+        firewall-cmd --zone=public --remove-port=$port/$proto --permanent
+        firewall-cmd --reload
     elif command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
-        ufw delete allow $port/$proto 2>/dev/null
+        ufw delete allow $port/$proto
     else
         local count=0
         while iptables -D INPUT -p $proto --dport $port -j ACCEPT 2>/dev/null; do
@@ -221,11 +221,11 @@ check_env() {
         
         if [[ $SYSTEM == "Alpine" ]]; then
             $PKG_INSTALL curl wget sudo procps iptables ip6tables iproute2 python3 openssl socat cronie libqrencode-tools jq coreutils nginx || { echo ""; red " [错误] 前置依赖安装失败！请检查系统源或网络后重试。"; exit 1; }
-            rc-update add crond default 2>/dev/null; rc-service crond start 2>/dev/null
+            rc-update add crond default; rc-service crond start
         elif [[ $SYSTEM == "CentOS" || $SYSTEM == "Fedora" || $SYSTEM == "Alma" || $SYSTEM == "Rocky" ]]; then
             $PKG_INSTALL epel-release || { echo ""; red " [错误] epel-release 扩展源安装失败！"; exit 1; }
             $PKG_INSTALL curl wget sudo procps iptables iptables-services iproute python3 openssl socat cronie qrencode jq coreutils nginx || { echo ""; red " [错误] 前置依赖安装失败！请检查系统源或网络后重试。"; exit 1; }
-            systemctl enable --now crond 2>/dev/null || systemctl enable --now cron 2>/dev/null
+            systemctl enable --now crond || systemctl enable --now cron
         else
             local wait_time=0
             while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/dpkg/lock >/dev/null 2>&1; do
@@ -239,7 +239,7 @@ check_env() {
             apt-get autoremove -y
             apt-get clean
             apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" -y install curl wget sudo procps iptables-persistent netfilter-persistent iproute2 python3 openssl socat cron qrencode jq coreutils nginx || { echo ""; red " [错误] 前置依赖安装失败！请检查 APT 源或网络后重试。"; exit 1; }
-            systemctl enable --now cron 2>/dev/null || systemctl enable --now crond 2>/dev/null
+            systemctl enable --now cron || systemctl enable --now crond
         fi
         
         echo ""
@@ -291,7 +291,7 @@ inst_cert() {
             domain=$(echo "$domain" | tr -d '\r' | tr -d ' ')
             green " 已记录域名：$domain"
             
-            domainIPs=$(DOMAIN="$domain" python3 -c "import socket, os; try: addrs=socket.getaddrinfo(os.environ.get('DOMAIN'), None); print(' '.join(list(set([a[4][0] for a in addrs])))) except: print('')" 2>/dev/null || echo "")
+            domainIPs=$(DOMAIN="$domain" python3 -c "import socket, os; try: addrs=socket.getaddrinfo(os.environ.get('DOMAIN'), None); print(' '.join(list(set([a[4][0] for a in addrs])))) except: print('')" || echo "")
             
             if [[ -z "$domainIPs" ]]; then
                 echo ""
@@ -499,20 +499,20 @@ inst_port() {
         echo "$firstport:$endport" > /etc/hysteria/port_hop.txt
         echo "udp:$firstport:$endport" >> /etc/hysteria/.firewall_state
 
-        iptables -I INPUT -p udp --dport $firstport:$endport -j ACCEPT 2>/dev/null
-        iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port 2>/dev/null
+        iptables -I INPUT -p udp --dport $firstport:$endport -j ACCEPT
+        iptables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port
         
         if lsmod | grep -q ip6table_nat || modprobe ip6table_nat 2>/dev/null; then
-            ip6tables -I INPUT -p udp --dport $firstport:$endport -j ACCEPT 2>/dev/null || true
-            ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port 2>/dev/null || true
+            ip6tables -I INPUT -p udp --dport $firstport:$endport -j ACCEPT || true
+            ip6tables -t nat -A PREROUTING -p udp --dport $firstport:$endport -j REDIRECT --to-ports $port || true
         else
             yellow "  [提示] 当前系统/内核不支持 IPv6 NAT，IPv6 端口跳跃已静默降级。"
         fi
 
-        if command -v ufw >/dev/null; then ufw allow $firstport:$endport/udp 2>/dev/null; fi
+        if command -v ufw >/dev/null; then ufw allow $firstport:$endport/udp; fi
         if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
-            firewall-cmd --zone=public --add-forward-port=port=$firstport-$endport:proto=udp:toport=$port --permanent 2>/dev/null
-            firewall-cmd --reload 2>/dev/null
+            firewall-cmd --zone=public --add-forward-port=port=$firstport-$endport:proto=udp:toport=$port --permanent
+            firewall-cmd --reload
         fi
         save_iptables
     fi
@@ -544,7 +544,7 @@ inst_sub_port(){
         if [[ "$sub_port_input" == "$port" ]]; then
             red " [警告] 订阅端口不能与 Hysteria 主端口 ($port) 冲突！"
         elif [[ -n "$firstport" && -n "$endport" && "$sub_port_input" -ge "$firstport" && "$sub_port_input" -le "$endport" ]]; then
-            red " [警告] 订阅端口不能与跳跃端口范围 ($firstport-$endport) 重叠冲突！"
+            red " [警告] 订阅端口不能与跳跃端口范围 ($firstport-$endport)重叠冲突！"
         else
             red " [警告] 端口必须在 1024-65535 之间！"
         fi
@@ -710,11 +710,11 @@ clean_env() {
                     count=0
                     while ip6tables -t nat -D PREROUTING -p udp --dport "$c_port:$c_endport" -j REDIRECT --to-ports $m_port 2>/dev/null; do count=$((count+1)); [[ $count -ge 15 ]] && break; done
                     if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
-                        firewall-cmd --zone=public --remove-forward-port=port=$c_port-$c_endport:proto=udp:toport=$m_port --permanent 2>/dev/null
-                        firewall-cmd --reload 2>/dev/null
+                        firewall-cmd --zone=public --remove-forward-port=port=$c_port-$c_endport:proto=udp:toport=$m_port --permanent
+                        firewall-cmd --reload
                     fi
                 fi
-                if command -v ufw >/dev/null; then ufw delete allow "$c_port:$c_endport/udp" 2>/dev/null; fi
+                if command -v ufw >/dev/null; then ufw delete allow "$c_port:$c_endport/udp"; fi
             elif [[ -n "$c_port" ]]; then
                 close_port "$c_port" "$c_proto"
             fi
@@ -727,18 +727,18 @@ clean_env() {
         [[ -n "$sub_port" && "$sub_port" =~ ^[0-9]+$ ]] && close_port "$sub_port" "tcp"
     fi
 
-    svc_stop hysteria-server 2>/dev/null; svc_disable hysteria-server 2>/dev/null
+    svc_stop hysteria-server; svc_disable hysteria-server
     
-    pkill -f "^python3 /var/www/hysteria/server.py$" 2>/dev/null || true
+    pkill -f "^python3 /var/www/hysteria/server.py$" || true
     rm -f /etc/nginx/conf.d/hysteria-sub.conf /etc/nginx/sites-available/hysteria-sub.conf /etc/nginx/sites-enabled/hysteria-sub.conf
-    rm -f /etc/nginx/http.d/hysteria-sub.conf 2>/dev/null
-    if [[ $SYSTEM == "Alpine" ]]; then rc-service nginx reload 2>/dev/null; else systemctl reload nginx 2>/dev/null; fi
+    rm -f /etc/nginx/http.d/hysteria-sub.conf
+    if [[ $SYSTEM == "Alpine" ]]; then rc-service nginx reload; else systemctl reload nginx; fi
 
     if [[ $SYSTEM == "Alpine" ]]; then
         rm -f /etc/init.d/hysteria-server /etc/init.d/hysteria-sub
     else
         rm -f /etc/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-sub.service
-        systemctl daemon-reload 2>/dev/null
+        systemctl daemon-reload
     fi
     save_iptables
 
@@ -750,7 +750,7 @@ clean_env() {
     if [[ "$mode" == "all" ]]; then
         local h_domain=$(cat /root/ca.log 2>/dev/null | tr -d '\r')
         if [[ -f "/root/.acme.sh/acme.sh" && -n "$h_domain" ]]; then
-            bash /root/.acme.sh/acme.sh --remove -d "$h_domain" 2>/dev/null
+            bash /root/.acme.sh/acme.sh --remove -d "$h_domain"
         fi
         rm -f /root/cert.crt /root/private.key /root/ca.log
         echo ""
@@ -881,19 +881,19 @@ EOF
     cp -L "$cert_path" "$sub_cert_dir/cert.crt" 2>/dev/null || cp -L /etc/hysteria/cert.crt "$sub_cert_dir/cert.crt"
     cp -L "$key_path" "$sub_cert_dir/private.key" 2>/dev/null || cp -L /etc/hysteria/private.key "$sub_cert_dir/private.key"
     
-    chown -R root:root "$sub_cert_dir" 2>/dev/null
-    chmod 400 "$sub_cert_dir/private.key" 2>/dev/null
+    chown -R root:root "$sub_cert_dir"
+    chmod 400 "$sub_cert_dir/private.key"
     chmod -R 755 "$web_dir"
 
     local nginx_conf_file="/etc/nginx/conf.d/hysteria-sub.conf"
     if [[ $SYSTEM == "Ubuntu" || $SYSTEM == "Debian" ]]; then
-        mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled 2>/dev/null
+        mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
         nginx_conf_file="/etc/nginx/sites-available/hysteria-sub.conf"
     elif [[ $SYSTEM == "Alpine" ]]; then
-        mkdir -p /etc/nginx/http.d 2>/dev/null
+        mkdir -p /etc/nginx/http.d
         nginx_conf_file="/etc/nginx/http.d/hysteria-sub.conf"
     else
-        mkdir -p /etc/nginx/conf.d 2>/dev/null
+        mkdir -p /etc/nginx/conf.d
     fi
     
     local ssl_config=""
@@ -943,22 +943,22 @@ EOF
 
     if [[ $SYSTEM == "Ubuntu" || $SYSTEM == "Debian" ]]; then
         ln -sf /etc/nginx/sites-available/hysteria-sub.conf /etc/nginx/sites-enabled/
-        rm -f /etc/nginx/sites-enabled/default 2>/dev/null
+        rm -f /etc/nginx/sites-enabled/default
     fi
 
-    if nginx -t >/dev/null 2>&1; then
-        svc_enable nginx 2>/dev/null
-        if [[ $SYSTEM == "Alpine" ]]; then rc-service nginx restart 2>/dev/null; else systemctl restart nginx 2>/dev/null; fi
+    if nginx -t; then
+        svc_enable nginx
+        if [[ $SYSTEM == "Alpine" ]]; then rc-service nginx restart; else systemctl restart nginx; fi
     else
         echo ""
         red "  [警告] Nginx 配置测试仍然失败！"
-        yellow "  [提示] 请手动执行 'nginx -t' 命令查看具体报错原因。"
+        yellow "  [提示] 请根据上方抛出的原生态报错信息排查原因。"
     fi
     
-    svc_stop hysteria-sub 2>/dev/null
-    svc_disable hysteria-sub 2>/dev/null
+    svc_stop hysteria-sub
+    svc_disable hysteria-sub
     rm -f /etc/systemd/system/hysteria-sub.service /etc/init.d/hysteria-sub
-    systemctl daemon-reload 2>/dev/null
+    systemctl daemon-reload
 }
 
 insthysteria() {
@@ -1358,7 +1358,7 @@ EOF
         [[ -z "$api_port" ]] && api_port=$(cat /etc/hysteria/api_port.txt | tr -d '\r')
     fi
 
-    local traffic_data=$(curl --max-time 3 "http://127.0.0.1:$api_port/traffic" 2>/dev/null)
+    local traffic_data=$(curl --max-time 3 "http://127.0.0.1:$api_port/traffic")
     
     clear
     echo ""
@@ -1404,7 +1404,7 @@ except Exception as e:
 
 starthysteria() {
     svc_start hysteria-server
-    if [[ $SYSTEM == "Alpine" ]]; then rc-service nginx restart 2>/dev/null; else systemctl restart nginx 2>/dev/null; fi
+    if [[ $SYSTEM == "Alpine" ]]; then rc-service nginx restart; else systemctl restart nginx; fi
     echo ""
     green "  Hysteria 2 及 Nginx 订阅服务已启动！"
     sleep 2
@@ -1459,7 +1459,7 @@ enable_bbr() {
     local total_mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
     [[ -z "$total_mem_kb" ]] && total_mem_kb=1048576 
     
-    local page_size=$(getconf PAGESIZE 2>/dev/null)
+    local page_size=$(getconf PAGESIZE)
     if ! [[ "$page_size" =~ ^[0-9]+$ ]] || [[ "$page_size" -le 0 ]]; then
         page_size=4096
     fi
@@ -1472,7 +1472,7 @@ enable_bbr() {
     local udp_mid=$(( udp_max * 3 / 4 ))
     local udp_min=$(( udp_max / 2 ))
 
-    local current_file_max=$(sysctl -n fs.file-max 2>/dev/null || echo 0)
+    local current_file_max=$(sysctl -n fs.file-max || echo 0)
     local file_max_config=""
     if [[ "$current_file_max" -lt 1048576 ]]; then
         file_max_config="fs.file-max=1048576\nfs.nr_open=1048576"
@@ -1492,9 +1492,9 @@ net.core.somaxconn=65535
 net.ipv4.udp_mem=$udp_min $udp_mid $udp_max
 EOF
     
-    sysctl -e --system >/dev/null 2>&1 || sysctl -e -p /etc/sysctl.d/99-hysteria-bbr.conf >/dev/null 2>&1 || sysctl -e -p >/dev/null 2>&1
+    sysctl -e --system || sysctl -e -p /etc/sysctl.d/99-hysteria-bbr.conf || sysctl -e -p
     
-    if sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q bbr; then
+    if sysctl net.ipv4.tcp_congestion_control | grep -q bbr; then
         echo ""
         green "  BBR 及极致的 UDP 缓冲区底层调优开启成功！"
         yellow "  已显著拉升最大并发连接数和收发包深度，可有效抵抗大流量时的丢包状况。"
@@ -1575,10 +1575,10 @@ check_cert() {
             yellow "  ▶ 证书生效日期    : $cert_start"
 
             if command -v python3 >/dev/null; then
-                local days_left=$(python3 -c "import datetime; t_str = ' '.join('$cert_end'.split()); t=datetime.datetime.strptime(t_str, '%b %d %H:%M:%S %Y %Z'); print((t - datetime.datetime.now()).days)" 2>/dev/null)
+                local days_left=$(python3 -c "import datetime; t_str = ' '.join('$cert_end'.split()); t=datetime.datetime.strptime(t_str, '%b %d %H:%M:%S %Y %Z'); print((t - datetime.datetime.now()).days)")
             else
-                local end_epoch=$(date -d "$cert_end" +%s 2>/dev/null)
-                local now_epoch=$(date +%s 2>/dev/null)
+                local end_epoch=$(date -d "$cert_end" +%s)
+                local now_epoch=$(date +%s)
                 if [[ -n "$end_epoch" && -n "$now_epoch" && "$end_epoch" =~ ^[0-9]+$ ]]; then
                     local days_left=$(( (end_epoch - now_epoch) / 86400 ))
                 fi
@@ -1599,10 +1599,10 @@ check_cert() {
             local is_mismatch=0
             local cert_type="ECC"
             
-            if openssl x509 -noout -modulus -in "$cert_path" 2>/dev/null | grep -q "Modulus"; then
+            if openssl x509 -noout -modulus -in "$cert_path" | grep -q "Modulus"; then
                 cert_type="RSA"
-                local cert_mod=$(openssl x509 -noout -modulus -in "$cert_path" 2>/dev/null | tr -d '\r\n ')
-                local key_mod=$(openssl rsa -noout -modulus -in "$key_path" 2>/dev/null | tr -d '\r\n ')
+                local cert_mod=$(openssl x509 -noout -modulus -in "$cert_path" | tr -d '\r\n ')
+                local key_mod=$(openssl rsa -noout -modulus -in "$key_path" | tr -d '\r\n ')
                 if [[ "$cert_mod" == "$key_mod" && -n "$cert_mod" ]]; then
                     green "  ▶ 证书与私钥匹配  : [✔] 完美配对 (RSA)"
                 else
@@ -1611,11 +1611,11 @@ check_cert() {
                 fi
             else
                 cert_type="ECC"
-                local cert_pub=$(openssl x509 -in "$cert_path" -pubkey -noout 2>/dev/null | sed '/^-----/d' | tr -d '\r\n ')
-                local key_pub=$(openssl pkey -in "$key_path" -pubout 2>/dev/null | sed '/^-----/d' | tr -d '\r\n ')
+                local cert_pub=$(openssl x509 -in "$cert_path" -pubkey -noout | sed '/^-----/d' | tr -d '\r\n ')
+                local key_pub=$(openssl pkey -in "$key_path" -pubout | sed '/^-----/d' | tr -d '\r\n ')
                 
                 if [[ -z "$key_pub" ]]; then
-                    key_pub=$(openssl ec -in "$key_path" -pubout 2>/dev/null | sed '/^-----/d' | tr -d '\r\n ')
+                    key_pub=$(openssl ec -in "$key_path" -pubout | sed '/^-----/d' | tr -d '\r\n ')
                 fi
 
                 if [[ "$cert_pub" == "$key_pub" && -n "$cert_pub" ]]; then
@@ -1653,11 +1653,11 @@ check_cert() {
                         chown -R root:root /var/www/hysteria/certs
                         
                         if [[ $SYSTEM == "Alpine" ]]; then
-                            rc-service hysteria-server restart 2>/dev/null
-                            rc-service nginx reload 2>/dev/null
+                            rc-service hysteria-server restart
+                            rc-service nginx reload
                         else
-                            systemctl restart hysteria-server 2>/dev/null
-                            systemctl reload nginx 2>/dev/null
+                            systemctl restart hysteria-server
+                            systemctl reload nginx
                         fi
                         echo ""
                         green "  [✔] 修复完成！核心服务与订阅服务已自动同步并重启。"
@@ -1887,8 +1887,8 @@ EOF
             
             echo ""
             yellow "  正在检查并应用新配置..."
-            if /usr/local/bin/hysteria server -c /etc/hysteria/config.yaml check 2>/dev/null || timeout 2 /usr/local/bin/hysteria server -c /etc/hysteria/config.yaml >/dev/null 2>&1; then
-                svc_stop hysteria-server 2>/dev/null
+            if /usr/local/bin/hysteria server -c /etc/hysteria/config.yaml check || timeout 2 /usr/local/bin/hysteria server -c /etc/hysteria/config.yaml; then
+                svc_stop hysteria-server
                 sleep 1
                 svc_start hysteria-server
                 green "  [✔] 重启成功！静态住宅 IP 落地规则已全面生效。"
@@ -1896,7 +1896,7 @@ EOF
                 red "  [✘] 致命错误：新生成的 YAML 配置文件格式错误！"
                 purple "  正在为您自动回滚到修改前的稳定配置..."
                 mv -f /etc/hysteria/config.yaml.bak /etc/hysteria/config.yaml
-                svc_stop hysteria-server 2>/dev/null
+                svc_stop hysteria-server
                 sleep 1
                 svc_start hysteria-server
                 green "  [✔] 回滚完成，服务已恢复原状。"
@@ -1949,7 +1949,7 @@ EOF
             green "  已清除落地代理与分流配置参数。"
             
             yellow "  正在重启 Hysteria 2 核心..."
-            svc_stop hysteria-server 2>/dev/null
+            svc_stop hysteria-server
             sleep 1
             svc_start hysteria-server
             sleep 2
