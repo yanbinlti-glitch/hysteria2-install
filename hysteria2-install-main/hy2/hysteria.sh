@@ -2282,3 +2282,11 @@ menu() {
         * ) red "  输入无效"; sleep 1 ;;
     esac
 }
+
+# 启动脚本的死循环入口
+while true; do
+    firstport=""
+    endport=""
+    hy_domain=""
+    menu
+done
