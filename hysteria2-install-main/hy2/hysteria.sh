@@ -1886,14 +1886,21 @@ EOF
             green "  新落地代理与路由配置写入完毕！"
             
             echo ""
-            yellow "  正在检查并应用新配置..."
-            if /usr/local/bin/hysteria server -c /etc/hysteria/config.yaml check || timeout 2 /usr/local/bin/hysteria server -c /etc/hysteria/config.yaml; then
-                svc_stop hysteria-server
-                sleep 1
-                svc_start hysteria-server
+            yellow "  正在应用新配置并重启服务..."
+            
+            # 1. 先停止正在运行的旧服务，彻底释放端口
+            svc_stop hysteria-server
+            sleep 2
+            
+            # 2. 启动服务加载新配置
+            svc_start hysteria-server
+            sleep 2
+            
+            # 3. 检查系统守护进程是否存活
+            if is_svc_active hysteria-server; then
                 green "  [✔] 重启成功！静态住宅 IP 落地规则已全面生效。"
             else
-                red "  [✘] 致命错误：新生成的 YAML 配置文件格式错误！"
+                red "  [✘] 致命错误：新配置应用后服务无法启动！"
                 purple "  正在为您自动回滚到修改前的稳定配置..."
                 mv -f /etc/hysteria/config.yaml.bak /etc/hysteria/config.yaml
                 svc_stop hysteria-server
