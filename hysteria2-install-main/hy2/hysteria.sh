@@ -21,9 +21,6 @@ purple(){ echo -e "${PURPLE}\033[01m$1${PLAIN}"; }
 
 [[ $EUID -ne 0 ]] && red "注意: 请在root用户下运行脚本" && exit 1
 
-# ==========================================
-# 注入快捷启动命令
-# ==========================================
 if [[ ! -f "/usr/local/bin/hy2" || "$(cat /usr/local/bin/hy2)" != "$(cat $0)" ]]; then
     cp "$0" /usr/local/bin/hy2
     chmod +x /usr/local/bin/hy2
@@ -32,24 +29,20 @@ if [[ ! -f "/usr/local/bin/hy2" || "$(cat /usr/local/bin/hy2)" != "$(cat $0)" ]]
 fi
 
 # ==========================================
-# 1. 动态检测包管理器及系统服务适配 (带极致静默与瘦身参数)
+# 1. 动态检测包管理器及系统服务适配 (极速静默模式)
 # ==========================================
 if [[ -x "$(command -v apk)" ]]; then
     PM="apk"
     PM_INSTALL="apk add -q --no-cache"
     PM_UPDATE="apk update -q"
-    PM_UNINSTALL="apk del -q"
-    CRON_PKG="cronie"
     CRON_SERVICE="crond"
     IPTABLES_PKG="iptables ip6tables"
     INIT_SYS="openrc"
 elif [[ -x "$(command -v apt-get)" ]]; then
     PM="apt-get"
-    # 核心优化: --no-install-recommends 拒绝安装非必要推荐包，极大节省磁盘
-    PM_INSTALL="apt-get install -y --no-install-recommends -qq"
+    # 注入提速参数：重试3次、不安装推荐包、强制静默
+    PM_INSTALL="apt-get install -y --no-install-recommends -qq -o Acquire::Retries=3"
     PM_UPDATE="apt-get update -y -qq"
-    PM_UNINSTALL="apt-get autoremove -y -qq"
-    CRON_PKG="cron"
     CRON_SERVICE="cron"
     IPTABLES_PKG="iptables-persistent netfilter-persistent"
     INIT_SYS="systemd"
@@ -57,8 +50,6 @@ elif [[ -x "$(command -v dnf)" ]]; then
     PM="dnf"
     PM_INSTALL="dnf install -y -q"
     PM_UPDATE="dnf check-update -q"
-    PM_UNINSTALL="dnf autoremove -y -q"
-    CRON_PKG="cronie"
     CRON_SERVICE="crond"
     IPTABLES_PKG="iptables-services"
     INIT_SYS="systemd"
@@ -66,8 +57,6 @@ elif [[ -x "$(command -v yum)" ]]; then
     PM="yum"
     PM_INSTALL="yum install -y -q"
     PM_UPDATE="yum check-update -q"
-    PM_UNINSTALL="yum autoremove -y -q"
-    CRON_PKG="cronie"
     CRON_SERVICE="crond"
     IPTABLES_PKG="iptables-services"
     INIT_SYS="systemd"
@@ -76,56 +65,53 @@ else
     exit 1
 fi
 
-# ==========================================
-# 2. 跨平台守护进程封装
-# ==========================================
 start_service() { if [[ $INIT_SYS == "openrc" ]]; then rc-service "$1" start >/dev/null 2>&1; else systemctl start "$1" >/dev/null 2>&1; fi; }
 stop_service() { if [[ $INIT_SYS == "openrc" ]]; then rc-service "$1" stop >/dev/null 2>&1; else systemctl stop "$1" >/dev/null 2>&1; fi; }
 enable_service() { if [[ $INIT_SYS == "openrc" ]]; then rc-update add "$1" default >/dev/null 2>&1; else systemctl enable "$1" >/dev/null 2>&1; fi; }
 disable_service() { if [[ $INIT_SYS == "openrc" ]]; then rc-update del "$1" default >/dev/null 2>&1; else systemctl disable "$1" >/dev/null 2>&1; fi; }
-check_service() {
-    if [[ $INIT_SYS == "openrc" ]]; then rc-service "$1" status 2>/dev/null | grep -i "started"; else systemctl status "$1" 2>/dev/null | grep -w "active"; fi
-}
+check_service() { if [[ $INIT_SYS == "openrc" ]]; then rc-service "$1" status 2>/dev/null | grep -i "started"; else systemctl status "$1" 2>/dev/null | grep -w "active"; fi; }
 reload_daemon() { if [[ $INIT_SYS == "systemd" ]]; then systemctl daemon-reload >/dev/null 2>&1; fi; }
 
 # ==========================================
-# 3. 依赖智能按需安装模块 (极度精简)
+# 原生 Bash 异步动画进度条
+# ==========================================
+spinner() {
+    local pid=$1
+    local delay=0.1
+    local spinstr='|/-\'
+    while kill -0 $pid 2>/dev/null; do
+        local temp=${spinstr#?}
+        printf " [%c]  " "$spinstr"
+        local spinstr=$temp${spinstr%"$temp"}
+        sleep $delay
+        printf "\b\b\b\b\b\b"
+    done
+    printf " \b\b\b\b"
+}
+
+# ==========================================
+# 2. 依赖按需极速安装与后台加载模块
 # ==========================================
 install_dependencies() {
-    cyan "正在检查系统环境与依赖..."
     local need_install=""
-    
-    # 检测缺失命令
     for cmd in curl qrencode openssl busybox iptables; do
-        if ! command -v $cmd >/dev/null 2>&1; then
-            need_install="yes"
-            break
-        fi
+        if ! command -v $cmd >/dev/null 2>&1; then need_install="yes"; break; fi
     done
 
     if [[ -n "$need_install" ]]; then
-        yellow "发现缺失依赖，正在静默安装 (已剔除 sudo/wget/臃肿推荐包)..."
-        ${PM_UPDATE} >/dev/null 2>&1
-        # 去掉 wget 和 sudo，仅保留核心必要包
-        ${PM_INSTALL} curl qrencode iptables $IPTABLES_PKG openssl busybox >/dev/null 2>&1
-        
-        # Alpine 底层依赖补充
-        if [[ $PM == "apk" ]]; then
-            ${PM_INSTALL} libc6-compat iproute2 bash coreutils grep >/dev/null 2>&1
-        fi
-        green "依赖安装完成！"
-    else
-        green "环境依赖完整，跳过安装。"
+        echo -n -e "${CYAN}\033[01m正在极速部署依赖环境，请稍候...\033[0m"
+        # 将安装过程放入后台，屏蔽所有输出，前台挂载进度条
+        (
+            ${PM_UPDATE} >/dev/null 2>&1
+            ${PM_INSTALL} curl qrencode iptables $IPTABLES_PKG openssl busybox >/dev/null 2>&1
+            if [[ $PM == "apk" ]]; then ${PM_INSTALL} libc6-compat iproute2 bash coreutils grep >/dev/null 2>&1; fi
+        ) & spinner $!
+        echo -e "\n${GREEN}\033[01m依赖安装完成！${PLAIN}"
     fi
 }
 
-realip(){
-    ip=$(curl -s4m8 ip.sb -k) || ip=$(curl -s6m8 ip.sb -k)
-}
+realip(){ ip=$(curl -s4m8 ip.sb -k) || ip=$(curl -s6m8 ip.sb -k); }
 
-# ==========================================
-# BBR 加速智能模块
-# ==========================================
 enable_bbr() {
     virt=$(systemd-detect-virt 2>/dev/null || hostnamectl 2>/dev/null | grep Virtualization | awk '{print $2}')
     if grep -q "lxc" /proc/1/environ 2>/dev/null || [[ "$virt" == "lxc" || "$virt" == "openvz" ]]; then
@@ -180,7 +166,6 @@ inst_sub_config(){
 }
 
 insthysteria(){
-    # 触发依赖检测与安装
     install_dependencies
     
     ARCH=$(uname -m)
@@ -191,13 +176,28 @@ insthysteria(){
         * ) red "不支持的架构: $ARCH" && exit 1 ;;
     esac
 
-    cyan "正在拉取 Hysteria 2 核心 ($HY2_ARCH) ..."
-    # 优化点：使用 curl 替代 wget，省去一个依赖包
-    if curl -L -k -sS -o /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${HY2_ARCH}"; then
-        chmod +x /usr/local/bin/hysteria
-        green "核心拉取成功！"
+    # ==========================================
+    # 智能 GitHub 源加速检测
+    # ==========================================
+    cyan "正在检测 GitHub 连通性以分配最优下载源..."
+    if curl -sL -m 2 https://github.com > /dev/null 2>&1; then
+        GH_URL="https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${HY2_ARCH}"
+        green "GitHub 直连畅通，使用官方源下载..."
     else
-        red "核心下载失败！请检查网络连通性。" && exit 1
+        GH_URL="https://ghp.ci/https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${HY2_ARCH}"
+        yellow "检测到 GitHub 直连受阻，已自动切换至国内/优化加速节点 (ghp.ci)..."
+    fi
+
+    echo -n -e "${CYAN}\033[01m正在拉取 Hysteria 2 核心 ($HY2_ARCH)...\033[0m"
+    (
+        curl -L -k -sS -o /usr/local/bin/hysteria "$GH_URL"
+    ) & spinner $!
+
+    if [[ -s "/usr/local/bin/hysteria" ]]; then
+        chmod +x /usr/local/bin/hysteria
+        echo -e "\n${GREEN}\033[01m核心拉取成功！${PLAIN}"
+    else
+        echo -e "\n${RED}\033[01m核心下载失败！请检查网络连通性。${PLAIN}" && exit 1
     fi
 
     inst_cert
@@ -229,11 +229,9 @@ EOF2
     if [[ -n $(echo $ip | grep ":") ]]; then last_ip="[$ip]"; else last_ip=$ip; fi
     url="hy2://$auth_pwd@$last_ip:$public_port/?insecure=1&sni=$hy_domain#NAT-Hysteria2"
 
-    # 生成订阅文件并 Base64 编码 (兼容各类主流客户端)
     mkdir -p /etc/hysteria/www
     echo -n "$url" | base64 -w 0 > /etc/hysteria/www/$sub_uuid
 
-    # 生成 Hysteria 2 主程序服务 (注入极低内存限制参数 GOGC & GOMEMLIMIT)
     if [[ $INIT_SYS == "openrc" ]]; then
         cat << 'SVC' > /etc/init.d/hysteria-server
 #!/sbin/openrc-run
@@ -248,7 +246,6 @@ depend() { need net; }
 SVC
         chmod +x /etc/init.d/hysteria-server
         
-        # OpenRC 下的 Busybox 订阅服务器
         cat << SVC3 > /etc/init.d/hy2-sub
 #!/sbin/openrc-run
 name="hy2-sub"
@@ -276,7 +273,6 @@ User=root
 [Install]
 WantedBy=multi-user.target
 EOF3
-        # Systemd 下的 Busybox 订阅服务器
         cat << EOF4 > /etc/systemd/system/hy2-sub.service
 [Unit]
 Description=Hysteria 2 Http Subscription Server
@@ -291,13 +287,11 @@ WantedBy=multi-user.target
 EOF4
     fi
 
-    # 保存配置信息留待后续查看
     sub_url="http://$last_ip:$sub_pub_port/$sub_uuid"
     echo "$sub_url" > /etc/hysteria/sub_url.txt
     echo "$url" > /etc/hysteria/hy2_url.txt
 
     enable_bbr
-
     reload_daemon
     enable_service hysteria-server
     enable_service hy2-sub
@@ -348,7 +342,7 @@ showconf(){
     echo "========================================================"
     cyan "【通用订阅链接 (推荐)】:"
     yellow "$(cat /etc/hysteria/sub_url.txt)"
-    echo "使用说明：复制上方链接，导入至 v2rayN / Nekobox / Clash 等支持订阅的客户端即可。"
+    echo "使用说明：复制上方链接，导入至客户端即可。"
     echo "--------------------------------------------------------"
     cyan "【单节点直连 URI】:"
     green "$(cat /etc/hysteria/hy2_url.txt)"
