@@ -40,7 +40,6 @@ if [[ -x "$(command -v apk)" ]]; then
     INIT_SYS="openrc"
 elif [[ -x "$(command -v apt-get)" ]]; then
     PM="apt-get"
-    # 注入提速参数：重试3次、不安装推荐包、强制静默
     PM_INSTALL="apt-get install -y --no-install-recommends -qq -o Acquire::Retries=3"
     PM_UPDATE="apt-get update -y -qq"
     CRON_SERVICE="cron"
@@ -73,7 +72,7 @@ check_service() { if [[ $INIT_SYS == "openrc" ]]; then rc-service "$1" status 2>
 reload_daemon() { if [[ $INIT_SYS == "systemd" ]]; then systemctl daemon-reload >/dev/null 2>&1; fi; }
 
 # ==========================================
-# 原生 Bash 异步动画进度条
+# 原生 Bash 异步动画进度条 (优化退出码捕获)
 # ==========================================
 spinner() {
     local pid=$1
@@ -87,6 +86,8 @@ spinner() {
         printf "\b\b\b\b\b\b"
     done
     printf " \b\b\b\b"
+    wait $pid
+    return $?
 }
 
 # ==========================================
@@ -100,7 +101,6 @@ install_dependencies() {
 
     if [[ -n "$need_install" ]]; then
         echo -n -e "${CYAN}\033[01m正在极速部署依赖环境，请稍候...\033[0m"
-        # 将安装过程放入后台，屏蔽所有输出，前台挂载进度条
         (
             ${PM_UPDATE} >/dev/null 2>&1
             ${PM_INSTALL} curl qrencode iptables $IPTABLES_PKG openssl busybox >/dev/null 2>&1
@@ -177,27 +177,40 @@ insthysteria(){
     esac
 
     # ==========================================
-    # 智能 GitHub 源加速检测
+    # 多重 Github 加速源轮询矩阵
     # ==========================================
-    cyan "正在检测 GitHub 连通性以分配最优下载源..."
-    if curl -sL -m 2 https://github.com > /dev/null 2>&1; then
-        GH_URL="https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${HY2_ARCH}"
-        green "GitHub 直连畅通，使用官方源下载..."
-    else
-        GH_URL="https://ghp.ci/https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${HY2_ARCH}"
-        yellow "检测到 GitHub 直连受阻，已自动切换至国内/优化加速节点 (ghp.ci)..."
-    fi
-
-    echo -n -e "${CYAN}\033[01m正在拉取 Hysteria 2 核心 ($HY2_ARCH)...\033[0m"
+    echo -n -e "${CYAN}\033[01m正在启动高可用镜像轮询拉取核心 ($HY2_ARCH)...\033[0m"
     (
-        curl -L -k -sS -o /usr/local/bin/hysteria "$GH_URL"
-    ) & spinner $!
+        MIRRORS=(
+            "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${HY2_ARCH}"
+            "https://ghproxy.net/https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${HY2_ARCH}"
+            "https://ghfast.top/https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${HY2_ARCH}"
+            "https://mirror.ghproxy.com/https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${HY2_ARCH}"
+            "https://github.moeyy.xyz/https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${HY2_ARCH}"
+        )
+        
+        for url in "${MIRRORS[@]}"; do
+            # 依次尝试，单次超时设为 12 秒
+            if curl -L -k -sS -m 12 -o /usr/local/bin/hysteria "$url"; then
+                if [[ -s "/usr/local/bin/hysteria" ]]; then
+                    exit 0 # 下载成功，立刻跳出循环
+                fi
+            fi
+        done
+        exit 1 # 所有镜像源全部失败
+    ) & 
+    spinner $!
+    DL_STATUS=$?
 
-    if [[ -s "/usr/local/bin/hysteria" ]]; then
+    if [[ $DL_STATUS -eq 0 && -s "/usr/local/bin/hysteria" ]]; then
         chmod +x /usr/local/bin/hysteria
-        echo -e "\n${GREEN}\033[01m核心拉取成功！${PLAIN}"
+        echo -e "\n${GREEN}\033[01m核心拉取成功！已切到最速节点。${PLAIN}"
     else
-        echo -e "\n${RED}\033[01m核心下载失败！请检查网络连通性。${PLAIN}" && exit 1
+        echo -e "\n${RED}\033[01m核心下载失败！所有的加速节点均无法解析或连接。${PLAIN}"
+        echo -e "${YELLOW}诊断: 这通常是因为 NAT 机器的 DNS 配置已损坏。${PLAIN}"
+        echo -e "请手动执行以下命令修复 DNS 后重新运行本脚本："
+        echo -e "${PURPLE}echo 'nameserver 8.8.8.8' > /etc/resolv.conf && echo 'nameserver 1.1.1.1' >> /etc/resolv.conf${PLAIN}"
+        exit 1
     fi
 
     inst_cert
