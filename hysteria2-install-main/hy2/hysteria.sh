@@ -22,40 +22,51 @@ purple(){ echo -e "${PURPLE}\033[01m$1${PLAIN}"; }
 [[ $EUID -ne 0 ]] && red "注意: 请在root用户下运行脚本" && exit 1
 
 # ==========================================
-# 1. 动态检测包管理器及系统服务适配
+# 注入快捷启动命令
+# ==========================================
+if [[ ! -f "/usr/local/bin/hy2" || "$(cat /usr/local/bin/hy2)" != "$(cat $0)" ]]; then
+    cp "$0" /usr/local/bin/hy2
+    chmod +x /usr/local/bin/hy2
+    green "已注入全局快捷命令: hy2 (后续可直接在终端输入 hy2 管理)"
+    sleep 1
+fi
+
+# ==========================================
+# 1. 动态检测包管理器及系统服务适配 (带极致静默与瘦身参数)
 # ==========================================
 if [[ -x "$(command -v apk)" ]]; then
     PM="apk"
-    PM_INSTALL="apk add --no-cache"
-    PM_UPDATE="apk update"
-    PM_UNINSTALL="apk del"
+    PM_INSTALL="apk add -q --no-cache"
+    PM_UPDATE="apk update -q"
+    PM_UNINSTALL="apk del -q"
     CRON_PKG="cronie"
     CRON_SERVICE="crond"
     IPTABLES_PKG="iptables ip6tables"
     INIT_SYS="openrc"
 elif [[ -x "$(command -v apt-get)" ]]; then
     PM="apt-get"
-    PM_INSTALL="apt-get install -y"
-    PM_UPDATE="apt-get update -y"
-    PM_UNINSTALL="apt-get autoremove -y"
+    # 核心优化: --no-install-recommends 拒绝安装非必要推荐包，极大节省磁盘
+    PM_INSTALL="apt-get install -y --no-install-recommends -qq"
+    PM_UPDATE="apt-get update -y -qq"
+    PM_UNINSTALL="apt-get autoremove -y -qq"
     CRON_PKG="cron"
     CRON_SERVICE="cron"
     IPTABLES_PKG="iptables-persistent netfilter-persistent"
     INIT_SYS="systemd"
 elif [[ -x "$(command -v dnf)" ]]; then
     PM="dnf"
-    PM_INSTALL="dnf install -y"
-    PM_UPDATE="dnf check-update"
-    PM_UNINSTALL="dnf autoremove -y"
+    PM_INSTALL="dnf install -y -q"
+    PM_UPDATE="dnf check-update -q"
+    PM_UNINSTALL="dnf autoremove -y -q"
     CRON_PKG="cronie"
     CRON_SERVICE="crond"
     IPTABLES_PKG="iptables-services"
     INIT_SYS="systemd"
 elif [[ -x "$(command -v yum)" ]]; then
     PM="yum"
-    PM_INSTALL="yum install -y"
-    PM_UPDATE="yum check-update"
-    PM_UNINSTALL="yum autoremove -y"
+    PM_INSTALL="yum install -y -q"
+    PM_UPDATE="yum check-update -q"
+    PM_UNINSTALL="yum autoremove -y -q"
     CRON_PKG="cronie"
     CRON_SERVICE="crond"
     IPTABLES_PKG="iptables-services"
@@ -77,10 +88,36 @@ check_service() {
 }
 reload_daemon() { if [[ $INIT_SYS == "systemd" ]]; then systemctl daemon-reload >/dev/null 2>&1; fi; }
 
-if [[ -z $(type -P curl) ]]; then
-    ${PM_UPDATE}
-    ${PM_INSTALL} curl
-fi
+# ==========================================
+# 3. 依赖智能按需安装模块 (极度精简)
+# ==========================================
+install_dependencies() {
+    cyan "正在检查系统环境与依赖..."
+    local need_install=""
+    
+    # 检测缺失命令
+    for cmd in curl qrencode openssl busybox iptables; do
+        if ! command -v $cmd >/dev/null 2>&1; then
+            need_install="yes"
+            break
+        fi
+    done
+
+    if [[ -n "$need_install" ]]; then
+        yellow "发现缺失依赖，正在静默安装 (已剔除 sudo/wget/臃肿推荐包)..."
+        ${PM_UPDATE} >/dev/null 2>&1
+        # 去掉 wget 和 sudo，仅保留核心必要包
+        ${PM_INSTALL} curl qrencode iptables $IPTABLES_PKG openssl busybox >/dev/null 2>&1
+        
+        # Alpine 底层依赖补充
+        if [[ $PM == "apk" ]]; then
+            ${PM_INSTALL} libc6-compat iproute2 bash coreutils grep >/dev/null 2>&1
+        fi
+        green "依赖安装完成！"
+    else
+        green "环境依赖完整，跳过安装。"
+    fi
+}
 
 realip(){
     ip=$(curl -s4m8 ip.sb -k) || ip=$(curl -s6m8 ip.sb -k)
@@ -111,8 +148,8 @@ inst_cert(){
     mkdir -p /etc/hysteria
     cert_path="/etc/hysteria/cert.crt"
     key_path="/etc/hysteria/private.key"
-    openssl ecparam -genkey -name prime256v1 -out /etc/hysteria/private.key
-    openssl req -new -x509 -days 36500 -key /etc/hysteria/private.key -out /etc/hysteria/cert.crt -subj "/CN=www.bing.com"
+    openssl ecparam -genkey -name prime256v1 -out /etc/hysteria/private.key 2>/dev/null
+    openssl req -new -x509 -days 36500 -key /etc/hysteria/private.key -out /etc/hysteria/cert.crt -subj "/CN=www.bing.com" 2>/dev/null
     chmod 777 /etc/hysteria/cert.crt /etc/hysteria/private.key
     hy_domain="www.bing.com"
 }
@@ -143,14 +180,9 @@ inst_sub_config(){
 }
 
 insthysteria(){
-    ${PM_UPDATE}
-    ${PM_INSTALL} curl wget sudo qrencode iptables $IPTABLES_PKG openssl busybox
+    # 触发依赖检测与安装
+    install_dependencies
     
-    # 为 Alpine 补充底层依赖以支持官方核心
-    if [[ $PM == "apk" ]]; then
-        ${PM_INSTALL} libc6-compat iproute2 bash coreutils grep
-    fi
-
     ARCH=$(uname -m)
     case "$ARCH" in
         x86_64 | x64 | amd64 ) HY2_ARCH="amd64" ;;
@@ -160,11 +192,12 @@ insthysteria(){
     esac
 
     cyan "正在拉取 Hysteria 2 核心 ($HY2_ARCH) ..."
-    if wget -N "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${HY2_ARCH}" -O /usr/local/bin/hysteria; then
+    # 优化点：使用 curl 替代 wget，省去一个依赖包
+    if curl -L -k -sS -o /usr/local/bin/hysteria "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${HY2_ARCH}"; then
         chmod +x /usr/local/bin/hysteria
-        green "核心下载成功！"
+        green "核心拉取成功！"
     else
-        red "核心下载失败！请检查网络。" && exit 1
+        red "核心下载失败！请检查网络连通性。" && exit 1
     fi
 
     inst_cert
