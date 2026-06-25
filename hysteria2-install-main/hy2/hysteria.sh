@@ -1,3 +1,4 @@
+cat << 'EOF' > /usr/local/bin/hy2
 #!/bin/bash
 
 export LANG=en_US.UTF-8
@@ -19,16 +20,6 @@ cyan(){ echo -e "${CYAN}\033[01m$1${PLAIN}"; }
 purple(){ echo -e "${PURPLE}\033[01m$1${PLAIN}"; }
 
 [[ $EUID -ne 0 ]] && red "注意: 请在root用户下运行脚本" && exit 1
-
-# ==========================================
-# 注入快捷启动命令
-# ==========================================
-if [[ ! -f "/usr/local/bin/hy2" || "$(cat /usr/local/bin/hy2)" != "$(cat $0)" ]]; then
-    cp "$0" /usr/local/bin/hy2
-    chmod +x /usr/local/bin/hy2
-    green "已注入全局快捷命令: hy2 (后续可直接在终端输入 hy2 管理)"
-    sleep 1
-fi
 
 # ==========================================
 # 1. 动态检测包管理器及系统服务适配
@@ -155,6 +146,11 @@ insthysteria(){
     ${PM_UPDATE}
     ${PM_INSTALL} curl wget sudo qrencode iptables $IPTABLES_PKG openssl busybox
     
+    # 为 Alpine 补充底层依赖以支持官方核心
+    if [[ $PM == "apk" ]]; then
+        ${PM_INSTALL} libc6-compat iproute2 bash coreutils grep
+    fi
+
     ARCH=$(uname -m)
     case "$ARCH" in
         x86_64 | x64 | amd64 ) HY2_ARCH="amd64" ;;
@@ -176,7 +172,7 @@ insthysteria(){
     inst_pwd
     inst_sub_config
 
-    cat << EOF > /etc/hysteria/config.yaml
+    cat << EOF2 > /etc/hysteria/config.yaml
 listen: :$port
 tls:
   cert: $cert_path
@@ -194,7 +190,7 @@ masquerade:
   proxy:
     url: https://en.snu.ac.kr
     rewriteHost: true
-EOF
+EOF2
 
     realip
     if [[ -n $(echo $ip | grep ":") ]]; then last_ip="[$ip]"; else last_ip=$ip; fi
@@ -220,7 +216,7 @@ SVC
         chmod +x /etc/init.d/hysteria-server
         
         # OpenRC 下的 Busybox 订阅服务器
-        cat << SVC2 > /etc/init.d/hy2-sub
+        cat << SVC3 > /etc/init.d/hy2-sub
 #!/sbin/openrc-run
 name="hy2-sub"
 command="/bin/busybox"
@@ -228,10 +224,10 @@ command_args="httpd -f -p $sub_port -h /etc/hysteria/www"
 command_background=true
 pidfile="/run/hy2-sub.pid"
 depend() { need net; }
-SVC2
+SVC3
         chmod +x /etc/init.d/hy2-sub
     else
-        cat << EOF > /etc/systemd/system/hysteria-server.service
+        cat << EOF3 > /etc/systemd/system/hysteria-server.service
 [Unit]
 Description=Hysteria 2 Server
 After=network.target
@@ -246,9 +242,9 @@ RestartSec=3
 User=root
 [Install]
 WantedBy=multi-user.target
-EOF
+EOF3
         # Systemd 下的 Busybox 订阅服务器
-        cat << EOF2 > /etc/systemd/system/hy2-sub.service
+        cat << EOF4 > /etc/systemd/system/hy2-sub.service
 [Unit]
 Description=Hysteria 2 Http Subscription Server
 After=network.target
@@ -259,7 +255,7 @@ Restart=always
 User=root
 [Install]
 WantedBy=multi-user.target
-EOF2
+EOF4
     fi
 
     # 保存配置信息留待后续查看
@@ -353,3 +349,7 @@ menu() {
 }
 
 menu
+EOF
+
+chmod +x /usr/local/bin/hy2
+hy2
