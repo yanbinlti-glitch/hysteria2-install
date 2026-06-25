@@ -3,4 +3,4 @@
 hysteria2 纯净版一键安装
 
 ```
-wget -O hysteria.sh https://raw.githubusercontent.com/yanbinlti-glitch/hysteria2-install/main/hy2/hysteria.sh && chmod +x hysteria.sh && bash hysteria.sh
+wget -O hysteria.sh https://raw.githubusercontent.com/yanbinlti-glitch/hysteria2-install/main/hysteria2-install-main/hy2/hysteria.sh && chmod +x hysteria.sh && bash hysteria.sh
