@@ -174,6 +174,7 @@ inst_cert(){
                 if [[ -f /root/cert.crt && -f /root/private.key ]] && [[ -s /root/cert.crt && -s /root/private.key ]]; then
                     echo $domain > /root/ca.log
                     if [[ $INIT_SYS == "openrc" ]]; then
+                        sed -i '/--cron/d' /var/spool/cron/crontabs/root >/dev/null 2>&1
                         echo "0 0 * * * bash /root/.acme.sh/acme.sh --cron -f >/dev/null 2>&1" >> /var/spool/cron/crontabs/root
                     else
                         sed -i '/--cron/d' /etc/crontab >/dev/null 2>&1
@@ -207,6 +208,7 @@ inst_cert(){
 
 inst_port(){
     iptables -t nat -F PREROUTING >/dev/null 2>&1
+    ip6tables -t nat -F PREROUTING >/dev/null 2>&1
     read -p "设置 Hysteria 2 端口 [1-65535]（回车则随机）：" port
     [[ -z $port ]] && port=$(shuf -i 2000-65535 -n 1)
     yellow "使用端口：$port"
@@ -261,13 +263,11 @@ insthysteria(){
     esac
 
     green "正在拉取 Hysteria 2 官方主程序 ($HY2_ARCH) ..."
-    wget -N "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${HY2_ARCH}" -O /usr/local/bin/hysteria
-    chmod +x /usr/local/bin/hysteria
-
-    if [[ -f "/usr/local/bin/hysteria" ]]; then
+    if wget -N "https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${HY2_ARCH}" -O /usr/local/bin/hysteria; then
+        chmod +x /usr/local/bin/hysteria
         green "Hysteria 2 主程序部署成功！"
     else
-        red "Hysteria 2 主程序下载失败！" && exit 1
+        red "Hysteria 2 主程序下载失败！请检查网络或 GitHub 连通性。" && exit 1
     fi
 
     # 生成守护进程文件
@@ -347,7 +347,7 @@ transport:
     hopInterval: 30s 
 EOF
 
-    url="hysteria2://$auth_pwd@$last_ip:$last_port/?insecure=1&sni=$hy_domain#Hysteria2-Node"
+    url="hy2://$auth_pwd@$last_ip:$last_port/?insecure=1&sni=$hy_domain#Hysteria2-Node"
     echo $url > /root/hy/url.txt
 
     reload_daemon
@@ -373,6 +373,7 @@ unsthysteria(){
     reload_daemon
     rm -rf /usr/local/bin/hysteria /etc/hysteria /root/hy
     iptables -t nat -F PREROUTING >/dev/null 2>&1
+    ip6tables -t nat -F PREROUTING >/dev/null 2>&1
     save_iptables
     green "Hysteria 2 已彻底卸载完成！"
 }
@@ -396,6 +397,8 @@ showconf(){
     red "$(cat /root/hy/hy-client.yaml)"
     yellow "\n节点分享链接 (/root/hy/url.txt):"
     red "$(cat /root/hy/url.txt)"
+    echo ""
+    qrencode -t ANSIUTF8 "$(cat /root/hy/url.txt)"
 }
 
 menu() {
